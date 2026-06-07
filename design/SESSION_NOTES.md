@@ -87,3 +87,31 @@ against the Ellie paks, then port to C#.
 - This sandbox is Linux with no .NET and no network to Microsoft, so the WPF app can't be compiled or
   run here. Verification was done by re-implementing the binary format in Python against real data.
   C#-level compile/run testing has to happen on Madi's Windows machine.
+
+## UPDATE 2 — geometry decoder + multi-part actor merge (WORKING)
+
+`tools/nd_mesh_extract.py` decodes TLOU2 GEOMETRY_1 and merges a full actor.
+
+**Bug found & fixed:** the SubMeshDesc stride is **192 bytes, not 176**. `NdPakMeshParser.cs`
+(SMD_STRIDE=176) only ever catches submesh 0 plus a coincidental alignment, so multi-group assets
+(e.g. the whole body) silently come out almost empty. Verified 192 by scanning contiguous valid SMD
+signatures across ellie-body/head/arms — all submeshes parse cleanly at 192. **This needs porting to
+the C# parser.** Also: LOD is the digit in `LODShape<N>` (highest = 0), and each submesh name encodes
+`<part>_lod0_LODShape<LOD>_shader<N>`.
+
+**Results (LOD0):**
+- ellie-head: 9 groups, 21,387 v / 33,670 tris
+- ellie-body: 4 groups, 14,158 v / 20,950 tris (innershirt, shoes, pants×2)
+- ellie-arms: 2 groups, 13,574 v / 24,382 tris
+- Merged actor: **49,119 verts** — head/body/arms share one coordinate space and stack into one
+  anatomically correct Ellie (verified by software-rendered front+side preview).
+
+**Three merge questions answered:**
+1. Enumerate all groups per asset — YES (GEOMETRY_1 → numSMD submeshes at stride 192, each named).
+2. Decode them all — YES (quantised continuous bitstream positions + UV1, vectorized bit reader).
+3. Merge into one export with per-group materials — YES for geometry (one OBJ, per-submesh `g`/`usemtl`
+   groups, indices rebased) AND across part-paks (head+body+arms→one Ellie). Per-PART diffuse is baked;
+   exact per-SUBMESH material/texture assignment needs MATERIAL_TABLE_1 parsing (next task). UV decode
+   verified correct via textured render (coherent wrap, no shearing).
+
+Deliverable: `/outputs/tlou2_textures/mesh/Ellie_Export/` (OBJ + MTL + 3 baked diffuse + meta.json).
