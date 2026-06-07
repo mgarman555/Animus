@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>GameAssetExplorer.UnrealEngine</AssemblyName>
+    <RootNamespace>GameAssetExplorer.Engines.UnrealEngine</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Core\Core.csproj" />
+
+    <!--
+      CUE4Parse: The open-source library that powers FModel.
+      Handles .pak, .utoc/.ucas archives, uasset/uexp parsing, and AES decryption.
+      MIT licensed. This is the foundation of our Unreal support.
+      https://github.com/FabianFG/CUE4Parse
+    -->
+    <PackageReference Include="CUE4Parse" Version="*" />
+    <PackageReference Include="CUE4Parse-Conversion" Version="*" />
+
+    <!--
+      SkiaSharp: Used for DDS->PNG texture conversion.
+      Handles all the BC1/BC3/BC5/BC7 block-compressed formats that UE uses.
+    -->
+    <PackageReference Include="SkiaSharp" Version="2.88.*" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="2.88.*" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,8 @@
+# Build output
+bin/
+obj/
+*.user
+# Caches
+*.cache
+# Texture/mesh audit scratch (large, regenerable)
+/outputs_scratch/

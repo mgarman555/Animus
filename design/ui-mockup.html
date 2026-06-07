@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Game Asset Explorer — UI Concept</title>
+<style>
+  :root{
+    --bg:#1E1E1E; --surface:#252526; --panel:#2D2D30; --panelDark:#1A1A1B;
+    --border:#3F3F46; --accent:#0E639C; --accentHover:#1177BB; --text:#CCCCCC;
+    --textSub:#969696; --textMuted:#555555; --selection:#094771;
+    --success:#4EC9B0; --warn:#E0A020; --error:#F44747;
+    --ue:#3aa0ff; --nd:#e0a020; --rage:#4EC9B0;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,sans-serif;font-size:13px;overflow:hidden}
+  .app{display:flex;flex-direction:column;height:100vh}
+
+  /* ── Title bar ─────────────────────────────── */
+  .titlebar{height:40px;background:var(--panelDark);border-bottom:1px solid var(--border);
+    display:flex;align-items:center;padding:0 12px;gap:14px;flex:0 0 auto}
+  .logo{font-weight:600;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+  .logo .mark{width:18px;height:18px;border-radius:4px;background:linear-gradient(135deg,var(--accent),var(--success))}
+  .gsearch{flex:1;max-width:520px;margin:0 auto;position:relative}
+  .gsearch input{width:100%;background:var(--panel);border:1px solid var(--border);border-radius:6px;
+    color:var(--text);padding:6px 10px 6px 30px;font-size:13px;outline:none}
+  .gsearch input:focus{border-color:var(--accent)}
+  .gsearch .ico{position:absolute;left:9px;top:6px;color:var(--textSub)}
+  .scope{font-size:11px;color:var(--textSub);margin-left:6px}
+  .tbtn{color:var(--textSub);cursor:pointer;padding:5px 8px;border-radius:4px}
+  .tbtn:hover{background:var(--panel);color:var(--text)}
+
+  /* ── Main 4-column body ────────────────────── */
+  .body{flex:1;display:flex;min-height:0}
+
+  /* Game rail */
+  .rail{width:212px;background:var(--panelDark);border-right:1px solid var(--border);
+    display:flex;flex-direction:column;flex:0 0 auto}
+  .rail h4,.col h4{font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--textMuted);
+    margin:0;padding:10px 12px 6px}
+  .game{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;border-left:2px solid transparent}
+  .game:hover{background:var(--panel)}
+  .game.active{background:var(--selection);border-left-color:var(--accentHover)}
+  .game .ic{width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+    font-weight:700;font-size:11px;color:#08121a;flex:0 0 auto}
+  .game .nm{font-size:12.5px;line-height:1.15}
+  .game .sub{font-size:10px;color:var(--textSub)}
+  .badge{font-size:9px;padding:1px 5px;border-radius:6px;font-weight:600;margin-left:auto}
+  .badge.ue{background:rgba(58,160,255,.16);color:var(--ue)}
+  .badge.nd{background:rgba(224,160,32,.16);color:var(--nd)}
+  .badge.rage{background:rgba(78,201,176,.16);color:var(--rage)}
+  .addgame{margin:8px 12px;padding:7px;border:1px dashed var(--border);border-radius:6px;text-align:center;
+    color:var(--textSub);cursor:pointer;font-size:12px}
+  .addgame:hover{border-color:var(--accent);color:var(--text)}
+  .railfoot{margin-top:auto;padding:10px 12px;border-top:1px solid var(--border);font-size:10px;color:var(--textMuted)}
+
+  /* Directory column */
+  .col{display:flex;flex-direction:column;min-height:0}
+  .dir{width:248px;background:var(--surface);border-right:1px solid var(--border);flex:0 0 auto}
+  .chips{display:flex;flex-wrap:wrap;gap:5px;padding:4px 10px 10px}
+  .chip{font-size:10.5px;padding:3px 8px;border-radius:11px;background:var(--panel);border:1px solid var(--border);
+    color:var(--textSub);cursor:pointer;user-select:none}
+  .chip.on{background:var(--selection);border-color:var(--accentHover);color:#dbeaf6}
+  .tree{overflow:auto;flex:1;padding:2px 6px 12px}
+  .node{padding:3px 6px;border-radius:4px;cursor:pointer;display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap}
+  .node:hover{background:var(--panel)}
+  .node.sel{background:var(--selection)}
+  .node .tw{color:var(--textSub);width:10px;display:inline-block}
+  .indent1{padding-left:18px}.indent2{padding-left:32px}.indent3{padding-left:46px}
+
+  /* Asset browser (center) */
+  .browser{flex:1;background:var(--bg);min-width:0}
+  .bbar{height:40px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;padding:0 12px;background:var(--surface)}
+  .crumbs{font-size:12px;color:var(--textSub)}
+  .crumbs b{color:var(--text);font-weight:600}
+  .count{font-size:11px;color:var(--textMuted)}
+  .view-toggle{margin-left:auto;display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+  .view-toggle div{padding:4px 9px;cursor:pointer;color:var(--textSub);font-size:12px}
+  .view-toggle div.on{background:var(--panel);color:var(--text)}
+  .grid{overflow:auto;height:calc(100% - 40px);padding:12px;display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:12px;align-content:start}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;cursor:pointer;transition:.12s}
+  .card:hover{border-color:var(--accent);transform:translateY(-1px)}
+  .card.sel{border-color:var(--accentHover);box-shadow:0 0 0 1px var(--accentHover)}
+  .thumb{height:96px;display:flex;align-items:center;justify-content:center;font-size:30px;
+    background:radial-gradient(circle at 50% 35%,#2c2c30,#161618);position:relative}
+  .thumb .typetag{position:absolute;top:6px;left:6px;font-size:9px;padding:1px 5px;border-radius:4px;background:rgba(0,0,0,.5);color:var(--textSub)}
+  .thumb .lod{position:absolute;bottom:6px;right:6px;font-size:9px;color:var(--textSub)}
+  .cmeta{padding:7px 8px}
+  .cname{font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .csub{font-size:10px;color:var(--textMuted);margin-top:2px}
+  .listrow{display:none}
+  body.listmode .grid{display:block;padding:0}
+  body.listmode .card{display:flex;align-items:center;border:0;border-bottom:1px solid var(--border);border-radius:0;background:transparent}
+  body.listmode .card:hover{background:var(--surface);transform:none}
+  body.listmode .thumb{height:34px;width:42px;font-size:16px;flex:0 0 auto;border-radius:0;background:transparent}
+  body.listmode .cmeta{display:flex;gap:18px;align-items:center;flex:1;padding:0 10px}
+  body.listmode .csub{margin:0}
+
+  /* Inspector (right) */
+  .inspector{width:344px;background:var(--surface);border-left:1px solid var(--border);display:flex;flex-direction:column;flex:0 0 auto}
+  .tabs{display:flex;border-bottom:1px solid var(--border)}
+  .tab{flex:1;text-align:center;padding:9px 4px;font-size:11.5px;color:var(--textSub);cursor:pointer;border-bottom:2px solid transparent}
+  .tab.on{color:var(--text);border-bottom-color:var(--accentHover)}
+  .tabbody{overflow:auto;flex:1}
+  .pv{height:210px;background:radial-gradient(circle at 50% 40%,#27272b,#141416);
+    display:flex;align-items:center;justify-content:center;position:relative;border-bottom:1px solid var(--border)}
+  .pv .ph{font-size:54px;opacity:.5}
+  .pv .ov{position:absolute;bottom:8px;left:8px;font-size:10px;color:var(--textSub);background:rgba(0,0,0,.4);padding:2px 7px;border-radius:4px}
+  .pv .ctrls{position:absolute;bottom:8px;right:8px;display:flex;gap:6px}
+  .pv .ctrls span{font-size:11px;color:var(--textSub);background:rgba(0,0,0,.4);padding:3px 6px;border-radius:4px;cursor:pointer}
+  .sect{padding:10px 12px;border-bottom:1px solid var(--border)}
+  .sect h5{margin:0 0 8px;font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--textMuted)}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:12px}
+  .kv .k{color:var(--textSub)}
+  .kv .v{color:var(--text);text-align:right;font-variant-numeric:tabular-nums}
+  .json{font-family:Consolas,monospace;font-size:11px;line-height:1.5;white-space:pre;color:var(--textSub);padding:10px 12px}
+  .json .key{color:#9cdcfe}.json .str{color:#ce9178}.json .num{color:#b5cea8}
+  .exrow{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px}
+  .exrow input[type=checkbox]{accent-color:var(--accent)}
+  select,.txt{background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:5px 8px;font-size:12px;width:100%}
+  .btn{background:var(--accent);color:#fff;border:0;border-radius:5px;padding:8px 12px;font-size:12.5px;cursor:pointer;width:100%}
+  .btn:hover{background:var(--accentHover)}
+  .btn.ghost{background:transparent;border:1px solid var(--border);color:var(--textSub)}
+  .btn.ghost:hover{color:var(--text);border-color:var(--accent)}
+
+  /* Bottom bar */
+  .footer{flex:0 0 auto;background:var(--panelDark);border-top:1px solid var(--border)}
+  .mergebar{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap;min-height:36px}
+  .mergebar .lab{font-size:11px;color:var(--textSub);font-weight:600}
+  .mq{display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--border);border-radius:5px;padding:3px 8px;font-size:11px}
+  .mq b{font-weight:500}.mq .x{color:var(--textMuted);cursor:pointer}.mq .x:hover{color:var(--error)}
+  .statusbar{display:flex;align-items:center;gap:12px;padding:5px 12px;font-size:11px;color:var(--textSub)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--success)}
+  .grow{flex:1}
+  .hint{font-size:10.5px;color:var(--textMuted)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Title bar -->
+  <div class="titlebar">
+    <div class="logo"><span class="mark"></span> Game Asset Explorer <span class="scope">v0.4 concept</span></div>
+    <div class="gsearch">
+      <span class="ico">🔍</span>
+      <input id="search" placeholder="Search assets across all mounted games…  (try: ellie, lightsaber, sm_01)"/>
+    </div>
+    <div class="tbtn" id="scopeBtn" title="Search scope">All games ▾</div>
+    <div class="tbtn" title="Settings">⚙</div>
+  </div>
+
+  <div class="body">
+
+    <!-- Game rail -->
+    <div class="rail">
+      <h4>Games</h4>
+      <div id="gameList"></div>
+      <div class="addgame">＋ Add Game…</div>
+      <div class="railfoot" id="railFoot">3 games mounted · 51 GB indexed</div>
+    </div>
+
+    <!-- Directory + filters -->
+    <div class="col dir">
+      <h4 id="dirTitle">Directory</h4>
+      <div class="chips" id="typeChips"></div>
+      <div class="tree" id="tree"></div>
+    </div>
+
+    <!-- Asset browser -->
+    <div class="col browser">
+      <div class="bbar">
+        <div class="crumbs" id="crumbs"></div>
+        <div class="count" id="count"></div>
+        <div class="view-toggle">
+          <div class="on" data-view="grid" onclick="setView('grid',this)">▦ Grid</div>
+          <div data-view="list" onclick="setView('list',this)">☰ List</div>
+        </div>
+      </div>
+      <div class="grid" id="assetGrid"></div>
+    </div>
+
+    <!-- Inspector -->
+    <div class="inspector">
+      <div class="tabs" id="tabs">
+        <div class="tab on" data-tab="preview" onclick="setTab('preview',this)">Preview</div>
+        <div class="tab" data-tab="props" onclick="setTab('props',this)">Properties</div>
+        <div class="tab" data-tab="export" onclick="setTab('export',this)">Export</div>
+      </div>
+      <div class="tabbody" id="tabbody"></div>
+    </div>
+  </div>
+
+  <!-- Footer: merge queue + status -->
+  <div class="footer">
+    <div class="mergebar">
+      <span class="lab">◈ Merge Queue</span>
+      <span id="mqItems" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+      <span class="hint" id="mqHint">— add character parts (head + body + arms) to combine into one mesh on export</span>
+      <span class="grow"></span>
+      <input class="txt" id="mergedName" style="width:170px" value="Ellie_Combined"/>
+      <button class="btn" style="width:auto" onclick="alert('Concept: loads all queued meshes, merges geometry under one skeleton, exports normalized FBX (Y-up, cm) + JSON sidecar.')">Export Merged ▸</button>
+    </div>
+    <div class="statusbar">
+      <span class="dot"></span><span id="status">Ready</span>
+      <span class="grow"></span>
+      <span class="hint">Output: /Output/&lt;Game&gt;/&lt;Category&gt;/&lt;Asset&gt;/  ·  FBX Y-up · cm · ORM unpacked</span>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ── Data model: real assets pulled from Madi's files ───────────────────── */
+const GAMES = {
+  tlou2:{ name:"The Last of Us Part II", sub:"actor97 · common_unpacked", engine:"ND", badge:"nd",
+    tool:"Custom .pak parser", mode:"character",
+    tree:["actor97/","  ellie/","  weapons/","  shared/skin/"],
+    assets:[
+      {n:"ellie-head", t:"SkeletalMesh", ic:"🧑", sub:"30 submeshes · 4 LOD", path:"actor97/ellie-head.pak",
+        meta:{Submeshes:30,LODs:4,"VRAM_DESC":192,"Diffuse":"BC7 (64²→2K)","Embedded tex":"thumbnails","Skeleton":"ellie-skel"}},
+      {n:"ellie-body", t:"SkeletalMesh", ic:"🧍", sub:"15 submeshes · 4 LOD", path:"actor97/ellie-body.pak",
+        meta:{Submeshes:15,LODs:4,"VRAM_DESC":106,"Diffuse":"BC1","Normal":"BC5","Skin detail":"BC1"}},
+      {n:"ellie-arms", t:"SkeletalMesh", ic:"💪", sub:"5 submeshes · 4 LOD", path:"actor97/ellie-arms.pak",
+        meta:{Submeshes:5,LODs:4,"VRAM_DESC":62,"Diffuse":"BC7","Wrinkle maps":"yes"}},
+      {n:"ellie-skel", t:"Armature", ic:"🦴", sub:"JOINT_HIERARCHY", path:"actor97/ellie-skel.pak",
+        meta:{Type:"Parent connector",Bones:"—","Drives":"head + body + arms"}},
+      {n:"ellie-jacket-cloth", t:"SkeletalMesh", ic:"🧥", sub:"cloth sim mesh", path:"actor97/ellie-jacket-cloth.pak",
+        meta:{Submeshes:"—",Cloth:"yes",Parent:"ellie-skel"}},
+      {n:"ellie-backpack", t:"StaticMesh", ic:"🎒", sub:"attach: spine_03", path:"actor97/ellie-backpack.pak",
+        meta:{Type:"Static",Attach:"spine_03 socket"}},
+      {n:"ellie-hair-cloth", t:"SkeletalMesh", ic:"💇", sub:"strand + cloth", path:"actor97/ellie-hair-cloth.pak",
+        meta:{Strands:"yes",Cloth:"yes"}},
+      {n:"bow-base", t:"StaticMesh", ic:"🏹", sub:"weapon", path:"actor97/bow-base.pak",
+        meta:{Type:"Static",Attach:"hand_r socket"}},
+      {n:"base-male-skel", t:"Armature", ic:"🦴", sub:"shared rig", path:"actor97/base-male-skel.pak",
+        meta:{Type:"Parent connector",Shared:"yes"}},
+      {n:"common-dict", t:"Texture", ic:"🖼", sub:"full-res dict · 2.0 GB", path:"texturedict3/common-dict.pak",
+        meta:{Type:"Texture dictionary",Lookup:"by hash",Size:"2.0 GB","Resolves":"diffuse/normal/ORM"}},
+    ]},
+  jedi:{ name:"Star Wars Jedi: Survivor", sub:"SwGame · UE4.27 (FModel)", engine:"UE", badge:"ue",
+    tool:"CUE4Parse", mode:"ue",
+    tree:["SwGame/Content/","  Items/Lightsaber/","  Items/Holocrons/","  Effects/Particles/","  CinematicOcean/"],
+    assets:[
+      {n:"Holocron_Static_Whole_Green", t:"StaticMesh", ic:"🟢", sub:".pskx · 1 LOD", path:"Game/Items/Holocrons/",
+        meta:{Class:"StaticMesh","Material slots":1,LODs:1,Format:".pskx → FBX"}},
+      {n:"Lightsaber_Hilt_Cal", t:"StaticMesh", ic:"⚔", sub:"3 material slots", path:"Content/Items/Lightsaber/",
+        meta:{Class:"StaticMesh","Material slots":3,Sockets:"emitter, grip"}},
+      {n:"M_Ocean_Opaque_Inst", t:"Material", ic:"🎨", sub:"material instance", path:"CinematicOcean/Materials/Ocean/",
+        meta:{Class:"MaterialInstanceConstant",Parent:"M_Ocean_Opaque","Params":12}},
+      {n:"MPC_Ocean", t:"DataTable", ic:"🔧", sub:"param collection", path:"CinematicOcean/MaterialParameterCollections/",
+        meta:{Class:"MaterialParameterCollection","Scalar params":8,"Vector params":4}},
+      {n:"WaterPlane_03", t:"StaticMesh", ic:"🌊", sub:"mesh json", path:"CinematicOcean/Meshes/",
+        meta:{Class:"StaticMesh",LODs:1}},
+      {n:"BP_Ocean", t:"Blueprint", ic:"📘", sub:"blueprint graph", path:"CinematicOcean/Blueprints/Ocean/",
+        meta:{Class:"Blueprint",Components:6}},
+      {n:"SQ_CustomTimeSeq", t:"Cinematic", ic:"🎬", sub:"level sequence", path:"CinematicOcean/Cinematics/",
+        meta:{Class:"LevelSequence",Tracks:9}},
+    ]},
+  gta5:{ name:"Grand Theft Auto V", sub:"TheLastDays pipeline · RAGE", engine:"RAGE", badge:"rage",
+    tool:"Codex / CodeWalker", mode:"world",
+    tree:["sm_01 (downtown)/","  drawables (.ydr)/","  textures (.ytd)/","  placement (.ymap)/","  collision (.ybn)/"],
+    assets:[
+      {n:"sm_01", t:"Texture", ic:"🧱", sub:".ytd dictionary", path:"GTA 5/sm_01.ytd",
+        meta:{Type:"Texture dictionary",Format:".ytd → DDS",Textures:"~40","+hi variant":"yes"}},
+      {n:"hei_sm_22", t:"Level", ic:"🗺", sub:".ymap placement", path:"GTA 5/hei_sm_22.ymap.xml",
+        meta:{Type:"Map placement",Tool:"CodeWalker XML","Entities":"streamed","→Blender":"ymap importer .py"}},
+      {n:"hei_sm_22_strm_0", t:"Level", ic:"🗺", sub:"streaming ymap", path:"GTA 5/hei_sm_22_strm_0.ymap.xml",
+        meta:{Type:"Streaming extent","LOD dist":"set"}},
+      {n:"hei_sm_22_0", t:"StaticMesh", ic:"🧊", sub:".ybn collision", path:"GTA 5/hei_sm_22_0.ybn.xml",
+        meta:{Type:"Collision bound",Format:".ybn"}},
+      {n:"hei_sm_22", t:"Animation", ic:"🎞", sub:".ycd clip dict", path:"GTA 5/hei_sm_22.ycd.xml",
+        meta:{Type:"Clip dictionary",Format:".ycd"}},
+      {n:"bh1_16_sm_22", t:"Texture", ic:"🧱", sub:".ytd", path:"GTA 5/bh1_16_sm_22.ytd.xml",
+        meta:{Type:"Texture dictionary"}},
+    ]},
+};
+
+const TYPE_ICON={SkeletalMesh:"🧍",StaticMesh:"🧊",Texture:"🖼",Animation:"🎞",Material:"🎨",
+  Armature:"🦴",Blueprint:"📘",Level:"🗺",Cinematic:"🎬",DataTable:"🔧",Audio:"🔊"};
+
+let state={game:"tlou2",type:"All",asset:null,tab:"preview",view:"grid",mq:[]};
+
+/* ── Render: game rail ──────────────────────────────────────────────────── */
+function renderGames(){
+  document.getElementById("gameList").innerHTML=Object.entries(GAMES).map(([id,g])=>`
+    <div class="game ${id===state.game?'active':''}" onclick="selectGame('${id}')">
+      <div class="ic" style="background:var(--${g.badge})">${g.engine}</div>
+      <div><div class="nm">${g.name}</div><div class="sub">${g.sub}</div></div>
+      <div class="badge ${g.badge}">${g.engine}</div>
+    </div>`).join("");
+}
+function selectGame(id){state.game=id;state.type="All";state.asset=null;renderAll();}
+
+/* ── Render: type chips + tree ──────────────────────────────────────────── */
+function renderDir(){
+  const g=GAMES[state.game];
+  document.getElementById("dirTitle").textContent=g.name.split(":")[0]+" · "+g.tool;
+  const types=["All",...new Set(g.assets.map(a=>a.t))];
+  document.getElementById("typeChips").innerHTML=types.map(t=>
+    `<div class="chip ${t===state.type?'on':''}" onclick="setType('${t}')">${t}${t==='All'?'':` · ${g.assets.filter(a=>a.t===t).length}`}</div>`).join("");
+  document.getElementById("tree").innerHTML=g.tree.map((line,i)=>{
+    const depth=(line.match(/^ */)[0].length)/2;
+    const name=line.trim();
+    return `<div class="node indent${depth}"><span class="tw">${name.endsWith('/')?'▸':' '}</span>${name.replace(/\/$/,'')}</div>`;
+  }).join("");
+}
+function setType(t){state.type=t;state.asset=null;renderDir();renderGrid();renderInspector();}
+
+/* ── Render: asset grid ─────────────────────────────────────────────────── */
+function visibleAssets(){
+  const g=GAMES[state.game];
+  const q=(document.getElementById("search").value||"").toLowerCase();
+  return g.assets.filter(a=>(state.type==="All"||a.t===state.type)&&(!q||a.n.toLowerCase().includes(q)));
+}
+function renderGrid(){
+  const g=GAMES[state.game], list=visibleAssets();
+  document.getElementById("crumbs").innerHTML=`<b>${g.name.split(":")[0]}</b> ▸ ${state.type}`;
+  document.getElementById("count").textContent=`${list.length} assets`;
+  document.getElementById("assetGrid").innerHTML=list.map((a,i)=>`
+    <div class="card ${state.asset===a?'sel':''}" onclick="selectAsset('${a.n}')">
+      <div class="thumb">${a.ic||TYPE_ICON[a.t]||'📦'}
+        <span class="typetag">${a.t}</span>
+        ${a.sub.includes('LOD')?`<span class="lod">${a.sub.match(/\d LOD/)||''}</span>`:''}
+      </div>
+      <div class="cmeta"><div class="cname">${a.n}</div><div class="csub">${a.sub}</div></div>
+    </div>`).join("");
+}
+function selectAsset(n){const g=GAMES[state.game];state.asset=g.assets.find(a=>a.n===n);renderGrid();renderInspector();
+  setStatus(`Selected ${n} — ${g.tool}`);}
+
+/* ── Render: inspector ──────────────────────────────────────────────────── */
+function renderInspector(){
+  const a=state.asset, body=document.getElementById("tabbody");
+  if(!a){body.innerHTML=`<div class="sect" style="color:var(--textMuted);text-align:center;padding:40px 12px">Select an asset to inspect</div>`;return;}
+  if(state.tab==="preview"){
+    const pvLabel={SkeletalMesh:"3D viewport · orbit / LOD",StaticMesh:"3D viewport · orbit",
+      Texture:"texture viewer · channels R G B A",Animation:"timeline · scrub",Material:"shader graph",
+      Armature:"skeleton view",Level:"placement map · top-down",Cinematic:"sequence tracks",
+      Blueprint:"node graph",DataTable:"table view"}[a.t]||"preview";
+    body.innerHTML=`
+      <div class="pv"><div class="ph">${a.ic||TYPE_ICON[a.t]}</div>
+        <div class="ov">${pvLabel}</div>
+        <div class="ctrls"><span title="Wireframe">◧</span><span title="LOD">LOD0 ▾</span><span title="Reset">⟳</span></div>
+      </div>
+      <div class="sect"><h5>${a.t} · ${GAMES[state.game].engine}</h5>
+        <div class="kv"><span class="k">Name</span><span class="v">${a.n}</span></div>
+        <div class="kv"><span class="k">Source</span><span class="v">${a.path}</span></div>
+      </div>
+      <div class="sect"><h5>Quick actions</h5>
+        <div style="display:flex;gap:8px">
+          <button class="btn ghost" onclick="addMerge('${a.n}')">＋ Merge queue</button>
+          <button class="btn" onclick="setTab('export',document.querySelector('[data-tab=export]'))">Export ▸</button>
+        </div></div>`;
+  } else if(state.tab==="props"){
+    const rows=Object.entries(a.meta).map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
+    const json=jsonPreview(a);
+    body.innerHTML=`<div class="sect"><h5>Properties</h5>${rows}</div>
+      <div class="sect"><h5>Metadata sidecar (preview)</h5><div class="json">${json}</div></div>`;
+  } else {
+    const g=GAMES[state.game];
+    body.innerHTML=`
+      <div class="sect"><h5>Export — ${a.n}</h5>
+        <div class="exrow"><label>Format</label></div>
+        <select>${a.t.includes('Mesh')||a.t==='Armature'?'<option>FBX (Y-up, cm)</option><option>OBJ</option><option>glTF</option>':a.t==='Texture'?'<option>PNG (ORM unpacked)</option><option>DDS passthrough</option><option>TGA</option>':a.t==='Animation'?'<option>FBX anim</option><option>BVH</option>':'<option>JSON</option>'}</select>
+        <div style="height:8px"></div>
+        <div class="exrow"><input type="checkbox" checked id="c1"><label for="c1">Write JSON metadata sidecar</label></div>
+        <div class="exrow"><input type="checkbox" checked id="c2"><label for="c2">Normalize to Unreal layout</label></div>
+        <div class="exrow"><input type="checkbox" ${a.t.includes('Mesh')?'checked':''} id="c3"><label for="c3">Include skeleton / parent connector</label></div>
+        <div class="exrow"><input type="checkbox" id="c4"><label for="c4">Resolve full-res textures (texturedict)</label></div>
+      </div>
+      <div class="sect"><h5>Destination</h5>
+        <div class="json">/Output/${g.name.split(':')[0].replace(/ /g,'')}/${a.t}/${a.n}/
+  ${a.n}.${a.t.includes('Mesh')?'fbx':a.t==='Texture'?'png':'json'}
+  ${a.t.includes('Mesh')?'Textures/  '+a.n+'_D.png  _N.png  _ORM.png\n  ':''}${a.n}_meta.json</div>
+        <button class="btn" onclick="setStatus('Exported '+'${a.n}'+' → /Output (concept)')">Export ${a.n} ▸</button>
+      </div>`;
+  }
+}
+function jsonPreview(a){
+  const o={asset_name:a.n,source_game:GAMES[state.game].name,extraction_tool:GAMES[state.game].tool,
+    asset_category:a.t,original_path:a.path,...a.meta};
+  return Object.entries(o).map(([k,v])=>{
+    const val=typeof v==='number'?`<span class="num">${v}</span>`:`<span class="str">"${v}"</span>`;
+    return `  <span class="key">"${k}"</span>: ${val},`;
+  }).join("\n").replace(/{/,'');
+}
+function setTab(t,el){state.tab=t;document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));if(el)el.classList.add('on');renderInspector();}
+
+/* ── Merge queue ────────────────────────────────────────────────────────── */
+function addMerge(n){if(!state.mq.includes(n))state.mq.push(n);renderMerge();setStatus(n+' added to merge queue');}
+function rmMerge(n){state.mq=state.mq.filter(x=>x!==n);renderMerge();}
+function renderMerge(){
+  document.getElementById("mqHint").style.display=state.mq.length?'none':'inline';
+  document.getElementById("mqItems").innerHTML=state.mq.map(n=>
+    `<span class="mq"><b>${n}</b><span class="x" onclick="rmMerge('${n}')">✕</span></span>`).join("");
+}
+
+/* ── misc ───────────────────────────────────────────────────────────────── */
+function setView(v,el){state.view=v;document.body.classList.toggle('listmode',v==='list');
+  document.querySelectorAll('.view-toggle div').forEach(x=>x.classList.remove('on'));el.classList.add('on');}
+function setStatus(s){document.getElementById("status").textContent=s;}
+function renderAll(){renderGames();renderDir();renderGrid();renderInspector();renderMerge();}
+document.getElementById("search").addEventListener("input",renderGrid);
+renderAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>GameAssetExplorer.TextureExporter</AssemblyName>
+    <RootNamespace>GameAssetExplorer.Exporters.TextureExporter</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Core\Core.csproj" />
+    <PackageReference Include="SkiaSharp" Version="2.88.*" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="2.88.*" />
+    <!-- BCnEncoder.NET: Decodes DXT/BC block-compressed textures to raw RGBA -->
+    <PackageReference Include="BCnEncoder.NET" Version="2.*" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>GameAssetExplorer.ModelExporter</AssemblyName>
+    <RootNamespace>GameAssetExplorer.Exporters.ModelExporter</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Core\Core.csproj" />
+    <!-- AssimpNet: Handles FBX export with full skeleton, bone, and material slot support -->
+    <PackageReference Include="AssimpNet" Version="4.1.0" />
+  </ItemGroup>
+
+</Project>

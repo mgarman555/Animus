@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -NoProfile -Command \"Get-Content -Encoding Byte -ReadCount 4 ''C:\\\\Users\\\\madie\\\\Desktop\\\\Game Assets\\\\TLOU2\\\\common_Unpacked\\\\actor97\\\\ellie-arms.pak'' | Select-Object -First 1 | ForEach-Object { [BitConverter]::ToString\\($_ }\")",
+      "Bash(xxd 'C:/Users/madie/Desktop/Game Assets/TLOU2/common_Unpacked/actor97/ellie-arms.pak')",
+      "Bash(dotnet build:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(xxd \"/c/Users/madie/Desktop/Game Assets/TLOU2/common_unpacked/actor97/bow-base.pak\")",
+      "Read(//c/Users/madie/Desktop/**)",
+      "Bash(python analyze_pak.py)",
+      "Bash(where.exe py:*)",
+      "Bash(where.exe python3.12)",
+      "Read(//c/Users/madie/AppData/Local/Programs/**)",
+      "Bash(ls /c/Python*/python.exe)",
+      "Bash(/c/Users/madie/AppData/Local/Microsoft/WindowsApps/python3.exe \"C:/Users/madie/Desktop/analyze_pak.py\")",
+      "Read(//c/Users/madie/AppData/Roaming/**)",
+      "Read(//c/tools//**)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Program Files \\(x86\\)/**)",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\madie\\\\Desktop\\\\analyze_pak.ps1\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\madie\\\\Desktop\\\\find_geo.ps1\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\madie\\\\Desktop\\\\find_section_types.ps1\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\madie\\\\Desktop\\\\find_geo_types.ps1\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\madie\\\\Desktop\\\\parse_geo3.ps1\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\madie\\\\Desktop\\\\parse_geo5.ps1\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File test_parser.ps1)",
+      "Bash(powershell -ExecutionPolicy Bypass -File diag_body_smds.ps1)",
+      "Bash(powershell -ExecutionPolicy Bypass -File diag_noesis_nav.ps1)",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\madie\\\\Desktop\\\\diag.ps1\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\madie\\\\Desktop\\\\diag8.ps1\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\madie\\\\Desktop\\\\Personal\\\\GameAssetExplorer\\\\src\\\\App\\\\\" -Recurse -Name *.xaml)",
+      "PowerShell($exePath = \"C:\\\\Users\\\\madie\\\\Desktop\\\\Personal\\\\GameAssetExplorer\\\\src\\\\App\\\\bin\\\\Release\\\\net8.0-windows\\\\GameAssetExplorer.exe\"; $shortcutPath = \"C:\\\\Users\\\\madie\\\\Desktop\\\\GameAssetExplorer.lnk\"; $wsh = New-Object -ComObject WScript.Shell; $sc = $wsh.CreateShortcut\\($shortcutPath\\); $sc.TargetPath = $exePath; $sc.WorkingDirectory = Split-Path $exePath; $sc.Description = \"Game Asset Explorer\"; $sc.Save\\(\\); Write-Output \"Shortcut created at $shortcutPath\")",
+      "Bash(dir \"C:\\\\\\\\Tools\")"
+    ]
+  }
+}

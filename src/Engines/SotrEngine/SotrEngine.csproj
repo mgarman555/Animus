@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>GameAssetExplorer.SotrEngine</AssemblyName>
+    <RootNamespace>GameAssetExplorer.Engines.SotrEngine</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Core\Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 335K-entry hash→path dictionary bundled directly in the assembly.
+         Loaded at mount time via GetManifestResourceStream — no external file needed. -->
+    <EmbeddedResource Include="Resources\SOTR_PC_Release.list">
+      <LogicalName>GameAssetExplorer.SotrEngine.SOTR_PC_Release.list</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

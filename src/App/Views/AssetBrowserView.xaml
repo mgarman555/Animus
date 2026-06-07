@@ -1,0 +1,504 @@
+<UserControl x:Class="GameAssetExplorer.App.Views.AssetBrowserView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:GameAssetExplorer.App.ViewModels"
+             xmlns:models="clr-namespace:GameAssetExplorer.Core.Models;assembly=GameAssetExplorer.Core"
+             xmlns:conv="clr-namespace:GameAssetExplorer.App.Views.Converters"
+             Background="{StaticResource Bg}"
+             Loaded="OnLoaded">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <!-- Toolbar -->
+            <RowDefinition Height="44"/>
+            <!-- 3-panel content -->
+            <RowDefinition Height="*"/>
+            <!-- Merge Queue panel (collapsed until queue has items) -->
+            <RowDefinition x:Name="MergeQueueRow" Height="Auto"/>
+            <!-- Status strip -->
+            <RowDefinition Height="28"/>
+        </Grid.RowDefinitions>
+
+        <!-- ── Toolbar ────────────────────────────────────────────────────── -->
+        <Border Grid.Row="0"
+                Background="{StaticResource Surface}"
+                BorderBrush="{StaticResource Border}"
+                BorderThickness="0,0,0,1">
+            <Grid Margin="8,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="1"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Back button -->
+                <Button Grid.Column="0"
+                        Content="← Back"
+                        Style="{StaticResource GhostBtn}"
+                        Command="{Binding GoBackCommand}"
+                        Margin="0,0,4,0"/>
+
+                <!-- Game name -->
+                <TextBlock Grid.Column="1"
+                           Text="{Binding GameName}"
+                           FontSize="14" FontWeight="SemiBold"
+                           VerticalAlignment="Center"
+                           Margin="4,0,12,0"/>
+
+                <!-- Vertical divider -->
+                <Rectangle Grid.Column="2" Fill="{StaticResource Border}" Width="1" Margin="4,6"/>
+
+                <!-- Search box -->
+                <Grid Grid.Column="4" Width="300" Margin="8,8" VerticalAlignment="Center">
+                    <TextBox x:Name="SearchBox"
+                             Text="{Binding SearchFilter, UpdateSourceTrigger=PropertyChanged, Delay=200}"
+                             FontSize="12"
+                             ToolTip="Search by asset name or path"/>
+                    <TextBlock Text="🔍  Search assets…"
+                               FontSize="12"
+                               Foreground="{StaticResource TextMuted}"
+                               IsHitTestVisible="False"
+                               VerticalAlignment="Center"
+                               Margin="10,0,0,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Text, ElementName=SearchBox}" Value="">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <!-- ── Three-Panel Layout ─────────────────────────────────────────── -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <!-- Left: File tree (resizable) -->
+                <ColumnDefinition Width="240" MinWidth="140"/>
+                <ColumnDefinition Width="4"/>
+                <!-- Center: Asset list (resizable) -->
+                <ColumnDefinition Width="*" MinWidth="200"/>
+                <ColumnDefinition Width="4"/>
+                <!-- Right: Preview + properties -->
+                <ColumnDefinition Width="320" MinWidth="200"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- ─── Left Panel: Virtual File Tree ─────────────────────────── -->
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="28"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0"
+                        Background="{StaticResource PanelDark}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="0,0,0,1">
+                    <TextBlock Text="files"
+                               FontSize="10"
+                               Foreground="{StaticResource TextMuted}"
+                               VerticalAlignment="Center"
+                               Margin="10,0"/>
+                </Border>
+
+                <TreeView Grid.Row="1"
+                          x:Name="FileTree"
+                          ItemsSource="{Binding RootNodes}"
+                          VirtualizingStackPanel.IsVirtualizing="True"
+                          VirtualizingStackPanel.VirtualizationMode="Recycling"
+                          BorderThickness="0,0,1,0"
+                          SelectedItemChanged="OnTreeSelectionChanged">
+                    <TreeView.ItemTemplate>
+                        <HierarchicalDataTemplate DataType="{x:Type vm:AssetTreeNode}"
+                                                  ItemsSource="{Binding Children}">
+                            <StackPanel Orientation="Horizontal" Margin="0,1">
+                                <TextBlock FontSize="11" Margin="0,0,5,0" VerticalAlignment="Center">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Text" Value="📄"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsFolder}" Value="True">
+                                                    <Setter Property="Text" Value="📁"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                                <TextBlock Text="{Binding DisplayName}" FontSize="12" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </HierarchicalDataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </Grid>
+
+            <!-- Splitter 1 -->
+            <GridSplitter Grid.Column="1"
+                          Width="4"
+                          HorizontalAlignment="Stretch"
+                          Background="{StaticResource Border}"
+                          Cursor="SizeWE"/>
+
+            <!-- ─── Center Panel: Grouped Asset Browser ───────────────────── -->
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="28"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header bar -->
+                <Border Grid.Row="0"
+                        Background="{StaticResource PanelDark}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="0,0,0,1">
+                    <TextBlock x:Name="AssetCountLabel"
+                               Text="{Binding FilteredAssets.Count, StringFormat='{}{0:N0} assets'}"
+                               FontSize="10"
+                               Foreground="{StaticResource TextMuted}"
+                               VerticalAlignment="Center"
+                               Margin="10,0"/>
+                </Border>
+
+                <!-- Loading overlay -->
+                <Border Grid.Row="1"
+                        Background="{StaticResource Bg}"
+                        Panel.ZIndex="1"
+                        Visibility="{Binding IsLoading, Converter={StaticResource BoolToVis}}">
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <TextBlock Text="Loading assets…"
+                                   Foreground="{StaticResource TextSub}"
+                                   HorizontalAlignment="Center"/>
+                        <ProgressBar IsIndeterminate="True"
+                                     Width="160" Height="3"
+                                     Margin="0,12,0,0"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Grouped asset tree -->
+                <TreeView Grid.Row="1"
+                          x:Name="AssetGroupTree"
+                          ItemsSource="{Binding AssetGroups}"
+                          VirtualizingStackPanel.IsVirtualizing="True"
+                          VirtualizingStackPanel.VirtualizationMode="Recycling"
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                          BorderThickness="0"
+                          SelectedItemChanged="OnAssetGroupTreeSelectionChanged"
+                          MouseDoubleClick="OnAssetTreeDoubleClick">
+                    <TreeView.Resources>
+
+                        <!-- ── Group header (AssetGroupNode) ── -->
+                        <HierarchicalDataTemplate DataType="{x:Type vm:AssetGroupNode}"
+                                                  ItemsSource="{Binding Assets}">
+                            <Grid Margin="2,3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="20"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding HeaderIcon}"
+                                           FontSize="12"
+                                           VerticalAlignment="Center"/>
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding TypeLabel}"
+                                           FontSize="12" FontWeight="SemiBold"
+                                           VerticalAlignment="Center"/>
+                                <Border Grid.Column="2"
+                                        Background="{StaticResource Panel}"
+                                        CornerRadius="8"
+                                        Padding="7,1"
+                                        Margin="6,0,2,0">
+                                    <TextBlock Text="{Binding CountLabel}"
+                                               FontSize="10"
+                                               Foreground="{StaticResource TextSub}"
+                                               VerticalAlignment="Center"/>
+                                </Border>
+                            </Grid>
+                        </HierarchicalDataTemplate>
+
+                        <!-- ── Asset leaf (AssetInfo) ── -->
+                        <DataTemplate DataType="{x:Type models:AssetInfo}">
+                            <Grid Margin="0,1">
+                                <!-- Right-click: export options -->
+                                <Grid.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Export…"
+                                                  Click="OnExportAssetMenuClick"/>
+                                        <MenuItem Header="Export as PNG"
+                                                  Click="OnExportTextureMenuClick"/>
+                                        <MenuItem Header="Export as OBJ"
+                                                  Click="OnExportMeshMenuClick"/>
+                                        <Separator/>
+                                        <MenuItem Header="Export with JSON metadata"
+                                                  Click="OnExportWithMetaMenuClick"/>
+                                        <Separator/>
+                                        <MenuItem Header="Add to Merge Queue"
+                                                  Click="OnAddToMergeQueueMenuClick"
+                                                  ToolTip="Queue this mesh for combined export with other parts"/>
+                                    </ContextMenu>
+                                </Grid.ContextMenu>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="64"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding Name}"
+                                           FontSize="12"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding CompressedSize, StringFormat='{}{0:N0} B'}"
+                                           FontSize="10"
+                                           Foreground="{StaticResource TextMuted}"
+                                           VerticalAlignment="Center"
+                                           HorizontalAlignment="Right"
+                                           Margin="0,0,4,0"/>
+                            </Grid>
+                        </DataTemplate>
+
+                    </TreeView.Resources>
+                </TreeView>
+            </Grid>
+
+            <!-- Splitter 2 -->
+            <GridSplitter Grid.Column="3"
+                          Width="4"
+                          HorizontalAlignment="Stretch"
+                          Background="{StaticResource Border}"
+                          Cursor="SizeWE"/>
+
+            <!-- ─── Right Panel: Preview + Info ───────────────────────────── -->
+            <Grid Grid.Column="4">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="28"/>
+                    <!-- Preview area -->
+                    <RowDefinition Height="200" MinHeight="80"/>
+                    <RowDefinition Height="4"/>
+                    <!-- Info / properties -->
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Preview header -->
+                <Border Grid.Row="0"
+                        Background="{StaticResource PanelDark}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="1,0,0,1">
+                    <TextBlock Text="preview"
+                               FontSize="10"
+                               Foreground="{StaticResource TextMuted}"
+                               VerticalAlignment="Center"
+                               Margin="10,0"/>
+                </Border>
+
+                <!-- Preview area -->
+                <Border Grid.Row="1"
+                        Background="{StaticResource PanelDark}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="1,0,0,0">
+                    <Grid>
+                        <!-- Empty state -->
+                        <TextBlock Text="Select an asset to preview"
+                                   FontSize="12"
+                                   Foreground="{StaticResource TextMuted}"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding PreviewedAsset}" Value="{x:Null}">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+
+                        <!-- Texture preview -->
+                        <Image x:Name="PreviewImage"
+                               Stretch="Uniform"
+                               RenderOptions.BitmapScalingMode="HighQuality"
+                               Visibility="Collapsed"
+                               Margin="8"/>
+                    </Grid>
+                </Border>
+
+                <!-- Splitter -->
+                <GridSplitter Grid.Row="2"
+                              Height="4"
+                              HorizontalAlignment="Stretch"
+                              Background="{StaticResource Border}"
+                              Cursor="SizeNS"/>
+
+                <!-- Info panel -->
+                <Grid Grid.Row="3">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="28"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0"
+                            Background="{StaticResource PanelDark}"
+                            BorderBrush="{StaticResource Border}"
+                            BorderThickness="1,0,0,1">
+                        <TextBlock Text="info"
+                                   FontSize="10"
+                                   Foreground="{StaticResource TextMuted}"
+                                   VerticalAlignment="Center"
+                                   Margin="10,0"/>
+                    </Border>
+
+                    <ScrollViewer Grid.Row="1"
+                                  VerticalScrollBarVisibility="Auto"
+                                  BorderBrush="{StaticResource Border}"
+                                  BorderThickness="1,0,0,0">
+                        <StackPanel x:Name="PropertiesPanel" Margin="10,8"/>
+                    </ScrollViewer>
+                </Grid>
+            </Grid>
+        </Grid>
+
+        <!-- ── Merge Queue Panel ─────────────────────────────────────────── -->
+        <!-- Appears when IsMergePanelVisible = true; lets the user build a multi-part
+             mesh (head + body + armor + hair) and export it as one combined OBJ. -->
+        <Border Grid.Row="2"
+                x:Name="MergeQueuePanel"
+                Background="{StaticResource Surface}"
+                BorderBrush="{StaticResource Border}"
+                BorderThickness="0,1,0,1"
+                Visibility="{Binding IsMergePanelVisible, Converter={StaticResource BoolToVis}}">
+            <Grid Margin="10,6">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Header row -->
+                <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal">
+                    <TextBlock Text="◈ Merge Queue"
+                               FontSize="12" FontWeight="SemiBold"
+                               VerticalAlignment="Center"
+                               Margin="0,0,8,0"/>
+                    <Border Background="{StaticResource Accent}"
+                            CornerRadius="8"
+                            Padding="7,1">
+                        <TextBlock Text="{Binding MergeQueueCount}"
+                                   FontSize="10"
+                                   Foreground="White"
+                                   VerticalAlignment="Center"/>
+                    </Border>
+                </StackPanel>
+
+                <!-- Buttons -->
+                <StackPanel Grid.Row="0" Grid.Column="1"
+                            Orientation="Horizontal">
+                    <TextBox x:Name="MergedNameBox"
+                             Text="{Binding MergedMeshName, UpdateSourceTrigger=PropertyChanged}"
+                             FontSize="11"
+                             Width="160"
+                             VerticalAlignment="Center"
+                             ToolTip="Name for the merged output file"
+                             Margin="0,0,8,0"/>
+                    <Button Content="Export Merged OBJ"
+                            Style="{StaticResource PrimaryBtn}"
+                            Click="OnExportMergedClick"
+                            IsEnabled="{Binding MergeQueueCount, Converter={StaticResource IntToBool}}"
+                            Margin="0,0,6,0"
+                            ToolTip="Load all queued meshes, merge geometry, and export as one OBJ file"/>
+                    <Button Content="✕ Clear"
+                            Style="{StaticResource GhostBtn}"
+                            Command="{Binding ClearMergeQueueCommand}"
+                            ToolTip="Remove all items from the merge queue"/>
+                </StackPanel>
+
+                <!-- Asset chips row -->
+                <ItemsControl Grid.Row="1" Grid.ColumnSpan="2"
+                              ItemsSource="{Binding MergeQueue}"
+                              Margin="0,5,0,0">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type models:AssetInfo}">
+                            <Border Background="{StaticResource Panel}"
+                                    CornerRadius="4"
+                                    Padding="8,3"
+                                    Margin="0,0,6,4">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="{Binding Name}"
+                                               FontSize="11"
+                                               VerticalAlignment="Center"/>
+                                    <Button Content="×"
+                                            FontSize="10"
+                                            Margin="6,0,0,0"
+                                            Padding="2,0"
+                                            Style="{StaticResource GhostBtn}"
+                                            Click="OnRemoveFromMergeQueueClick"
+                                            Tag="{Binding}"
+                                            ToolTip="Remove from merge queue"/>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Grid>
+        </Border>
+
+        <!-- ── Status Strip ───────────────────────────────────────────────── -->
+        <Border Grid.Row="3"
+                Background="{StaticResource Panel}"
+                BorderBrush="{StaticResource Border}"
+                BorderThickness="0,1,0,0">
+            <Grid Margin="10,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="120"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0"
+                           Text="{Binding StatusMessage}"
+                           FontSize="11"
+                           Foreground="{StaticResource TextSub}"
+                           VerticalAlignment="Center"/>
+
+                <TextBlock Grid.Column="1"
+                           Text="{Binding ExportStatus}"
+                           FontSize="11"
+                           Foreground="{StaticResource TextSub}"
+                           VerticalAlignment="Center"
+                           Margin="0,0,8,0"/>
+
+                <ProgressBar Grid.Column="2"
+                             Value="{Binding ExportProgress}"
+                             Maximum="100"
+                             Height="3"
+                             VerticalAlignment="Center">
+                    <ProgressBar.Style>
+                        <Style TargetType="ProgressBar">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsExporting}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ProgressBar.Style>
+                </ProgressBar>
+            </Grid>
+        </Border>
+    </Grid>
+
+</UserControl>
