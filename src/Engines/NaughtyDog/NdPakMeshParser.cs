@@ -16,7 +16,7 @@ namespace GameAssetExplorer.Engines.NaughtyDog;
 ///   Each entry (16 bytes): namePtr(u64) resItemOffset(u32) pad(u32)
 ///   ResItem at pageBase+riOff: namePtr(u64) typePtr(u64) → string "GEOMETRY_1"
 ///
-/// SubMeshDesc stride = 176 bytes (TLOU2):
+/// SubMeshDesc stride = 192 bytes (TLOU2):
 ///   +0x20 namePtr(ptr)   +0x30 m_pStreamDesc(ptr)  +0x40 m_pIndexes(ptr)
 ///   +0x88 numVerts(u32)  +0x8C numIndexes(u32)      +0x90 numStreamSrc(u32)
 ///
@@ -37,7 +37,7 @@ public static class NdPakMeshParser
 {
     const int PAGE_ENTRY_SZ = 12;
     const int FIX_ENTRY_SZ  = 8;
-    const int SMD_STRIDE    = 176;
+    const int SMD_STRIDE    = 192;
 
     struct Page { public int FileOffset; public int Size; }
 
