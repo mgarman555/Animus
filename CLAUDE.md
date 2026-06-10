@@ -7,10 +7,12 @@ Educational game asset explorer (.exe) for browsing, previewing, and exporting a
 > Git history is in `handoff/GameAssetExplorer.bundle` (see `handoff/PUSH_INSTRUCTIONS.md`).
 >
 > **Done since handoff (verified vs real Ellie paks):** ① `SMD_STRIDE` fixed 176→192 — all groups now
-> decode (head 9/body 4/arms 2 at LOD0). ② `MATERIAL_TABLE` per-submesh texture linkage implemented —
-> each submesh now resolves its own diffuse/normal texPath (e.g. body = shirt-inner + shoes + pants-uv +
-> pants-skein, each its own colour map). **Next:** render those per-submesh textures in
-> `SkeletalMeshViewerWindow` (it already builds per-submesh geometry; just applies one shared brush today).
+> decode (head 9/body 4/arms 2 at LOD0). ② `MATERIAL_TABLE` per-submesh texture linkage — each submesh
+> resolves its own diffuse/normal texPath. ③ Per-submesh full-res textures wired to the viewer (plugin
+> resolves each via the texturedict; `SkeletalMeshViewerWindow` paints each submesh its own brush). Body
+> decodes as denim shirt + Ellie's jeans + Converse high-tops, each its own 2K atlas (PNG-verified).
+> **Next:** open the app and eyeball the textured Ellie in the 3D viewer (only thing not yet GUI-checked),
+> then the multi-game UI shell (`design/ui-mockup.html`) and the RAGE `.ytd` reader.
 
 ---
 
@@ -83,15 +85,15 @@ src/
 - Skeletal mesh 3D viewer: mouse-orbit, LOD switch, OBJ fallback, smooth normals
 - NaughtyDog pak mesh parsing: quantised continuous-bitstream positions, all submesh groups decode (stride 192), flat LOD grouping via "ShapeN" names
 - NaughtyDog per-submesh materials: each submesh resolves its own diffuse/normal texPath from its `m_material` struct
-- Mesh-level diffuse: VRAM_DESC scan + full-res `texturedict3` hash lookup + BCnEncoder decode + ImageBrush (single shared texture)
+- NaughtyDog per-submesh textures: plugin resolves each submesh's diffuse to full-res via `texturedict3`;
+  `SkeletalMeshViewerWindow` decodes + paints each submesh its own `ImageBrush` (PNG-verified; GUI eyeball pending)
+- Mesh-level diffuse: VRAM_DESC scan + full-res `texturedict3` hash lookup + BCnEncoder decode + ImageBrush
 
 ### In Progress
-- **Per-submesh texture display in 3D mesh viewer** (highest priority)
-  - DONE: `SubmeshInfo.DiffuseTexturePath/NormalTexturePath` populated by `NdPakMeshParser`
-  - Need: plugin resolves each submesh's texPath → full-res bytes (mirror the mesh-level `_texDict.LookupAsync`)
-  - Need: `SkeletalMeshViewerWindow` decodes + applies a per-submesh `ImageBrush` (it already builds per-submesh
-    geometry + UVs; `BuildMaterial()`/`UpdateMeshVisual()` currently apply one shared brush to all submeshes)
-  - Note: full-res dict textures are LINEAR (no GOB untile); only the 64×64 embedded thumbnails are tiled
+- **Multi-game UI shell + Codex/FModel hybrid** — see `design/ui-mockup.html`. `AssetBrowserView` is single-game;
+  the data model already supports many games + a global cross-game search. Add the game rail + cross-game search VM.
+- Note: full-res dict textures are LINEAR (no GOB untile); only the 64×64 embedded thumbnails are tiled (per-submesh
+  decode in the viewer forces skip-untile for that reason)
 
 ### Planned
 - FBX model export (CUE4Parse-Conversion)
