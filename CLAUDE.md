@@ -2,6 +2,16 @@
 
 Educational game asset explorer (.exe) for browsing, previewing, and exporting assets from multiple game engines. Personal tool for Madi's extract → Blender → reimport-into-UE pipeline.
 
+> **START HERE (handoff):** Read `HANDOFF.md` and `design/SESSION_NOTES.md` first. A Cowork session
+> reverse-engineered and proved the full TLOU2 extraction path in Python (`tools/`).
+> Git history is in `handoff/GameAssetExplorer.bundle` (see `handoff/PUSH_INSTRUCTIONS.md`).
+>
+> **Done since handoff (verified vs real Ellie paks):** ① `SMD_STRIDE` fixed 176→192 — all groups now
+> decode (head 9/body 4/arms 2 at LOD0). ② `MATERIAL_TABLE` per-submesh texture linkage implemented —
+> each submesh now resolves its own diffuse/normal texPath (e.g. body = shirt-inner + shoes + pants-uv +
+> pants-skein, each its own colour map). **Next:** render those per-submesh textures in
+> `SkeletalMeshViewerWindow` (it already builds per-submesh geometry; just applies one shared brush today).
+
 ---
 
 ## Tech Stack
@@ -71,14 +81,17 @@ src/
 - Texture export → PNG (BC block decode + SkiaSharp)
 - JSON metadata sidecar export
 - Skeletal mesh 3D viewer: mouse-orbit, LOD switch, OBJ fallback, smooth normals
-- NaughtyDog pak mesh parsing: quantised continuous-bitstream positions, flat LOD grouping via "ShapeN" names
+- NaughtyDog pak mesh parsing: quantised continuous-bitstream positions, all submesh groups decode (stride 192), flat LOD grouping via "ShapeN" names
+- NaughtyDog per-submesh materials: each submesh resolves its own diffuse/normal texPath from its `m_material` struct
+- Mesh-level diffuse: VRAM_DESC scan + full-res `texturedict3` hash lookup + BCnEncoder decode + ImageBrush (single shared texture)
 
 ### In Progress
-- **Texture display in 3D mesh viewer** (highest priority)
-  - `MeshAssetData` already has `DiffuseTextureData/Width/Height/Format` fields
-  - Need: VRAM_DESC scan in `NdPakMeshParser.cs` → populate those fields
-  - Need: `SkeletalMeshViewerWindow` decode (BCnEncoder) + apply as `ImageBrush`
-  - Note: embedded textures are 64×64 GPU-tiled thumbnails (NVidia "1D thin"); untiling required before BC decode
+- **Per-submesh texture display in 3D mesh viewer** (highest priority)
+  - DONE: `SubmeshInfo.DiffuseTexturePath/NormalTexturePath` populated by `NdPakMeshParser`
+  - Need: plugin resolves each submesh's texPath → full-res bytes (mirror the mesh-level `_texDict.LookupAsync`)
+  - Need: `SkeletalMeshViewerWindow` decodes + applies a per-submesh `ImageBrush` (it already builds per-submesh
+    geometry + UVs; `BuildMaterial()`/`UpdateMeshVisual()` currently apply one shared brush to all submeshes)
+  - Note: full-res dict textures are LINEAR (no GOB untile); only the 64×64 embedded thumbnails are tiled
 
 ### Planned
 - FBX model export (CUE4Parse-Conversion)
@@ -100,8 +113,9 @@ src/
 ### GEOMETRY_1 / SubMeshDesc
 - Scan page headers for type string `"GEOMETRY_1"` (via fixup pointer at `riBase+8`)
 - TLOU2 pad: `+16` bytes before geometry header (`isTLOU2` check: `R32(loginStart+32) == 74565`)
-- SMD array pointer at `ghOff+40` (fixup → absolute); stride = **176 bytes**
-- Key SMD field offsets: `+0x20` namePtr, `+0x30` streamDescPtr, `+0x40` indexPtr, `+0x88` numVerts, `+0x8C` numIdx, `+0x90` numStreams
+- SMD array pointer at `ghOff+40` (fixup → absolute); stride = **192 bytes** (TLOU2 PC — Noesis's 176 is wrong here; the count fields sit +8 from where the Noesis walk puts them, so the real struct is 16 bytes longer)
+- Key SMD field offsets: `+0x20` namePtr, `+0x30` streamDescPtr, `+0x40` indexPtr, `+0x48` m_material, `+0x88` numVerts, `+0x8C` numIdx, `+0x90` numStreams
+- numMaterials field (`ghOff+16`) reads 0 on these paks — do NOT gate material parsing on it; use each submesh's `+0x48` m_material pointer directly
 - LOD index: read from name suffix `"ShapeN"` (N = 0..3)
 - **Continuous bitstream**: quantised positions use a single shared `bitOff` across all vertices — do NOT reset per vertex
 
@@ -120,6 +134,19 @@ src/
 - Prefer imgFormat == 98 (BC7) for diffuse colour
 - Texture bytes start at: `pages[pageCt-1].FileOffset + pages[pageCt-1].Size + pakOffset`
 - Embedded textures are 64×64 GPU-tiled (NVidia 1D-thin GOB layout); must untile before decoding
+
+### MATERIAL_TABLE / per-submesh textures (verified vs Ellie paks)
+Each submesh resolves its own material+textures via the `m_material` fixup pointer at **SMD `+0x48`**:
+- Material struct: `+0x00` shaderAssetName(ptr→matName e.g. "…/pants-uv:…"), `+0x08` shaderType(ptr),
+  `+0x20` **texDescList**(ptr), `+0x114` **texCount**(u32)
+- Each texDesc entry is **48 bytes**: `+0x00` name(ptr → `"g_tNdFetchBaseColor01Map"` etc.),
+  `+0x18` sub(ptr → `{ +0x00 path(ptr), +0x08 vramHash(u64) }`)
+- `vramHash` keys the VRAM_DESC table (hash @ `vramBase+56`) → texPath @ `vramBase+112`; the texPath's
+  trailing filename hash drives the full-res `texturedict3` lookup
+- Diffuse = name contains `"BaseColor01"`, fallback any `"Color0"` (eyes); normal = `"Normal01"`.
+  Alpha-only parts (eyelashes, tears) legitimately have no colour map → leave diffuse empty
+- Implemented in `NdPakMeshParser.ParseSubmeshMaterial`; stored on `SubmeshInfo.{MaterialName,
+  DiffuseTexturePath, NormalTexturePath}`. Authoritative reference: `fmt_nd_pak.py` ~L2296-2356
 
 ---
 
