@@ -6,3 +6,6 @@ obj/
 *.cache
 # Texture/mesh audit scratch (large, regenerable)
 /outputs_scratch/
+
+# Handoff artifacts (bundle is a copy of history; no need to track)
+handoff/
