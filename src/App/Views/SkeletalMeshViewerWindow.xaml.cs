@@ -28,6 +28,8 @@ public partial class SkeletalMeshViewerWindow : Window
     private readonly List<string>         _submeshNames = new();
     private readonly List<bool>           _submeshVisible = new();
     private readonly List<CheckBox>       _submeshChecks = new();
+    private readonly List<SubmeshInfo>    _submeshInfos = new();    // parallel to _submeshGeoms
+    private readonly List<ImageBrush?>    _submeshBrushes = new();  // per-submesh diffuse, null = none
 
     // Material brushes (texture decoded once per LOD)
     private ImageBrush? _textureBrush;
@@ -125,6 +127,8 @@ public partial class SkeletalMeshViewerWindow : Window
             _submeshGeoms.Clear();
             _submeshNames.Clear();
             _submeshVisible.Clear();
+            _submeshInfos.Clear();
+            _submeshBrushes.Clear();
 
             // Use the parser-emitted submesh boundaries; if absent, treat the whole LOD as one
             var submeshes = lod.Submeshes.Count > 0
@@ -149,6 +153,7 @@ public partial class SkeletalMeshViewerWindow : Window
                 _submeshGeoms.Add(geo);
                 _submeshNames.Add(string.IsNullOrEmpty(sm.Name) ? $"Shape{_submeshGeoms.Count - 1}" : sm.Name);
                 _submeshVisible.Add(true);
+                _submeshInfos.Add(sm);
             }
 
             if (_submeshGeoms.Count == 0) return false;
@@ -167,9 +172,14 @@ public partial class SkeletalMeshViewerWindow : Window
                     _textureBrush = TryDecodeMeshTexture(_meshData!);
             }
 
-            // Reset toggle state — enabled whenever there's texture data (even if decode failed)
-            ChkTexture.IsEnabled = hasTextureData;
-            ChkTexture.IsChecked = _textureBrush != null;
+            // Per-submesh diffuse: each submesh carries its own full-res (linear) BC bytes,
+            // decoded with the swap/flip the auto-detect just settled on for this asset.
+            BuildSubmeshBrushes();
+            bool hasAnyTexture = hasTextureData || _submeshBrushes.Any(b => b != null);
+
+            // Reset toggle state — enabled whenever there's any texture (even if decode failed)
+            ChkTexture.IsEnabled = hasAnyTexture;
+            ChkTexture.IsChecked = _textureBrush != null || _submeshBrushes.Any(b => b != null);
             ChkTexture.ToolTip   = hasTextureData && _textureBrush == null
                 ? "Texture decode failed — toggle on to see the broken result"
                 : null;
@@ -296,15 +306,26 @@ public partial class SkeletalMeshViewerWindow : Window
     private void UpdateMeshVisual()
     {
         var group = new Model3DGroup();
-        var material = BuildMaterial();
+        bool useTex = ChkTexture.IsChecked == true;
 
         for (int i = 0; i < _submeshGeoms.Count; i++)
         {
             if (!_submeshVisible[i]) continue;
+
+            // Prefer this submesh's own diffuse; fall back to the shared mesh-level
+            // texture, then to a solid colour. Lets one body show distinct tank-top /
+            // pants / shoes textures instead of one map smeared across everything.
+            Brush brush = _solidBrush;
+            if (useTex)
+            {
+                var perSubmesh = i < _submeshBrushes.Count ? _submeshBrushes[i] : null;
+                brush = perSubmesh ?? (Brush?)_textureBrush ?? _solidBrush;
+            }
+
             group.Children.Add(new GeometryModel3D
             {
                 Geometry     = _submeshGeoms[i],
-                Material     = material,
+                Material     = BuildMaterial(brush),
                 BackMaterial = new DiffuseMaterial(_backBrush),
             });
         }
@@ -312,16 +333,45 @@ public partial class SkeletalMeshViewerWindow : Window
         MeshVisual.Content = group;
     }
 
-    private Material BuildMaterial()
+    private static Material BuildMaterial(Brush brush)
     {
         var mg = new MaterialGroup();
-        Brush brush = (ChkTexture.IsChecked == true && _textureBrush != null)
-            ? _textureBrush
-            : _solidBrush;
         mg.Children.Add(new DiffuseMaterial(brush));
         mg.Children.Add(new SpecularMaterial(
             new SolidColorBrush(Color.FromRgb(0xFF, 0xFF, 0xFF)), 60));
         return mg;
+    }
+
+    /// <summary>
+    /// Decode each submesh's own full-resolution diffuse into an ImageBrush. Dict textures
+    /// are linear (no GOB tiling), so untile is always skipped here; swap-RB / flip-V follow
+    /// whatever the mesh-level auto-detect settled on for this asset.
+    /// </summary>
+    private void BuildSubmeshBrushes()
+    {
+        _submeshBrushes.Clear();
+        bool swap       = ChkSwapRB?.IsChecked     == true;
+        bool flip       = ChkFlipV?.IsChecked      == true;
+        bool honorAlpha = ChkHonorAlpha?.IsChecked == true;
+
+        foreach (var sm in _submeshInfos)
+        {
+            ImageBrush? brush = null;
+            if (sm.DiffuseTextureData is { } data
+                && sm.DiffuseTextureWidth > 0 && sm.DiffuseTextureHeight > 0)
+            {
+                try
+                {
+                    var bmp = DecodeTextureWithConfig(
+                        data, sm.DiffuseTextureWidth, sm.DiffuseTextureHeight,
+                        sm.DiffuseTextureFormat,
+                        skipUntile: true, swap, flip, honorAlpha);
+                    if (bmp != null) brush = new ImageBrush(bmp) { Stretch = Stretch.Fill };
+                }
+                catch { /* leave this submesh untextured */ }
+            }
+            _submeshBrushes.Add(brush);
+        }
     }
 
     // ── Armature overlay ──────────────────────────────────────────────────────
@@ -482,6 +532,8 @@ public partial class SkeletalMeshViewerWindow : Window
     private void OnAutoDetectTexture(object sender, RoutedEventArgs e)
     {
         AutoDetectTextureSettings(applyImmediately: true);
+        BuildSubmeshBrushes();
+        UpdateMeshVisual();
     }
 
     private record DecodeConfig(bool SkipUntile, bool SwapRB, bool FlipV, string? Format);
@@ -618,8 +670,9 @@ public partial class SkeletalMeshViewerWindow : Window
 
     private void ReDecodeAndApply()
     {
-        if (_meshData?.DiffuseTextureData == null) return;
-        _textureBrush = TryDecodeMeshTexture(_meshData);
+        if (_meshData?.DiffuseTextureData != null)
+            _textureBrush = TryDecodeMeshTexture(_meshData);
+        BuildSubmeshBrushes();
         UpdateMeshVisual();
     }
 
@@ -917,15 +970,20 @@ public partial class SkeletalMeshViewerWindow : Window
     private BitmapSource? DecodeMeshTextureWithConfig(
         MeshAssetData meshData, bool skipUntile, bool swapRB, bool flipV,
         bool honorAlpha, string? forcedFormat)
-    {
-        byte[]? texData = meshData.DiffuseTextureData;
-        int w = meshData.DiffuseTextureWidth;
-        int h = meshData.DiffuseTextureHeight;
-        string format = meshData.DiffuseTextureFormat;
-        if (texData == null || w <= 0 || h <= 0) return null;
+        => DecodeTextureWithConfig(
+            meshData.DiffuseTextureData, meshData.DiffuseTextureWidth, meshData.DiffuseTextureHeight,
+            forcedFormat ?? meshData.DiffuseTextureFormat, skipUntile, swapRB, flipV, honorAlpha);
 
-        // Debug overrides
-        string effectiveFormat = forcedFormat ?? format;
+    /// <summary>
+    /// Decode raw BCn bytes (one base mip) into a frozen Bgra32 bitmap, applying the
+    /// untile / swap-RB / flip-V / alpha settings. Shared by the mesh-level material,
+    /// the per-submesh brushes, and the Dump-to-PNG export.
+    /// </summary>
+    private static BitmapSource? DecodeTextureWithConfig(
+        byte[]? texData, int w, int h, string effectiveFormat,
+        bool skipUntile, bool swapRB, bool flipV, bool honorAlpha)
+    {
+        if (texData == null || w <= 0 || h <= 0) return null;
 
         int bpb = (effectiveFormat == "BC1" || effectiveFormat == "BC4") ? 8 : 16;
 
