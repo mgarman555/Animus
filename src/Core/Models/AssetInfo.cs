@@ -147,6 +147,18 @@ public class SubmeshInfo
 
     /// <summary>VRAM_DESC texPath of this submesh's normal (Normal01) map. Empty if none.</summary>
     public string NormalTexturePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Full-resolution diffuse for this submesh: raw block-compressed bytes (decode with
+    /// <see cref="DiffuseTextureFormat"/>). Resolved from <see cref="DiffuseTexturePath"/> via the
+    /// texturedict; null until resolved (or if the submesh has no colour map). Lets the viewer
+    /// texture each submesh individually instead of sharing one mesh-level diffuse.
+    /// </summary>
+    public byte[]? DiffuseTextureData { get; set; }
+    public int     DiffuseTextureWidth  { get; set; }
+    public int     DiffuseTextureHeight { get; set; }
+    /// <summary>DXGI format name of <see cref="DiffuseTextureData"/>, e.g. "BC7", "BC1".</summary>
+    public string  DiffuseTextureFormat { get; set; } = string.Empty;
 }
 
 public class SkeletonData

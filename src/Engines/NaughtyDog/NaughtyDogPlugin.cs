@@ -414,6 +414,34 @@ public class NaughtyDogPlugin : IGameEngine
                         mesh.RawProperties["Texture"] = $"{existingTex} [thumbnail only — hash not in dict]";
                     }
                 }
+
+                // Resolve each submesh's own diffuse to full-res so the viewer can texture
+                // submeshes individually (body = tank top + pants + shoes, each its own map).
+                // Many submeshes share a texPath (e.g. head partition0/1), so cache per call.
+                if (_texDict.IsLoaded)
+                {
+                    var perPath = new Dictionary<string, (byte[] Data, int W, int H, string Fmt)?>(
+                        StringComparer.OrdinalIgnoreCase);
+                    int resolved = 0;
+                    foreach (var lod in mesh.Lods)
+                    foreach (var sm in lod.Submeshes)
+                    {
+                        if (string.IsNullOrEmpty(sm.DiffuseTexturePath)) continue;
+                        if (!perPath.TryGetValue(sm.DiffuseTexturePath, out var hit))
+                            perPath[sm.DiffuseTexturePath] = hit =
+                                await _texDict.LookupAsync(sm.DiffuseTexturePath).ConfigureAwait(false);
+                        if (hit is { } t)
+                        {
+                            sm.DiffuseTextureData   = t.Data;
+                            sm.DiffuseTextureWidth  = t.W;
+                            sm.DiffuseTextureHeight = t.H;
+                            sm.DiffuseTextureFormat = t.Fmt;
+                            resolved++;
+                        }
+                    }
+                    if (resolved > 0)
+                        Console.WriteLine($"[ND] Resolved full-res diffuse for {resolved} submesh(es) of {asset.Name}");
+                }
                 return mesh;
             }
         }
