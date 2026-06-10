@@ -134,6 +134,19 @@ public class SubmeshInfo
     public int VertexCount { get; set; }
     public int IndexStart { get; set; }
     public int IndexCount { get; set; }
+
+    /// <summary>Material name from the submesh's m_material struct (e.g. "pants-uv", "shoes"). Empty if unresolved.</summary>
+    public string MaterialName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// VRAM_DESC texPath of this submesh's diffuse (BaseColor01) map, used for full-resolution
+    /// texturedict lookup. Each submesh of a multi-material asset (e.g. a body = tank top + pants +
+    /// shoes) carries its own diffuse here. Empty if the material has no resolvable colour map.
+    /// </summary>
+    public string DiffuseTexturePath { get; set; } = string.Empty;
+
+    /// <summary>VRAM_DESC texPath of this submesh's normal (Normal01) map. Empty if none.</summary>
+    public string NormalTexturePath { get; set; } = string.Empty;
 }
 
 public class SkeletonData

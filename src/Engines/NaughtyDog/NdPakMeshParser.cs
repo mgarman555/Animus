@@ -237,6 +237,9 @@ public static class NdPakMeshParser
         bool isTLOU2   = R32(data, loginStart + 32) == 74565u;
         int  padSz     = isTLOU2 ? 48 : 32;
 
+        // ── VRAM hash → texPath map (for per-submesh material texture lookup) ──
+        var vrams = BuildVramHashMap(data, pages, pageCt, isTLOU2);
+
         // ── Find GEOMETRY_1 ───────────────────────────────────────────────────
         int geoStart = -1, geoItemOff = -1;
         for (int p = 0; p < pageCt && geoItemOff < 0; p++)
@@ -423,6 +426,9 @@ public static class NdPakMeshParser
                 UvOfU = uvOfU, UvOfV = uvOfV,
             };
 
+            // Resolve this submesh's material → per-submesh diffuse/normal texPaths
+            ParseSubmeshMaterial(data, pages, fixups, sd, vrams, smdInfo);
+
             if (!smdByLod.TryGetValue(lodIdx, out var bucket))
                 smdByLod[lodIdx] = bucket = new List<SMDInfo>();
             bucket.Add(smdInfo);
@@ -508,6 +514,9 @@ public static class NdPakMeshParser
                     VertexCount = s.NVerts,
                     IndexStart  = submeshIndexStart,
                     IndexCount  = s.NIdx,
+                    MaterialName       = s.MaterialName,
+                    DiffuseTexturePath = s.DiffuseTexturePath,
+                    NormalTexturePath  = s.NormalTexturePath,
                 });
 
                 totalVerts += s.NVerts;
@@ -723,6 +732,128 @@ public static class NdPakMeshParser
         return result;
     }
 
+    // ── Material → texture linkage ────────────────────────────────────────────
+    //
+    // Each SubMeshDesc carries an m_material fixup pointer at +0x48. The material
+    // struct (faithful to fmt_nd_pak.py) lays out as:
+    //   +0x00 shaderAssetName(ptr)  +0x08 shaderType(ptr)  +0x10 UUID(u64)
+    //   +0x18 shaderParams(ptr)     +0x20 texDescList(ptr)  +0x28 shaderNames(ptr)
+    //   +0x114 texCount(u32)
+    // Each texDesc entry is 48 bytes:
+    //   +0x00 name(ptr) → "g_tNdFetchBaseColor01Map" etc.
+    //   +0x18 sub(ptr)  → { +0x00 path(ptr)  +0x08 vramHash(u64) }
+    // vramHash keys the VRAM_DESC table (hash @ vramBase+56) → texPath @ vramBase+112,
+    // whose trailing hash drives the full-resolution texturedict lookup.
+
+    /// <summary>Resolve a 64-bit fixup pointer at <paramref name="addr"/> to an absolute file offset, or -1.</summary>
+    static int ResolvePtr(byte[] data, Page[] pages, Dictionary<int, int> fixups, int addr)
+    {
+        if (addr < 0 || addr + 8 > data.Length) return -1;
+        if (!fixups.TryGetValue(addr, out int dst)) return -1;
+        if (dst < 0 || dst >= pages.Length) return -1;
+        long lo = BitConverter.ToInt64(data, addr);
+        return pages[dst].FileOffset + (int)lo;
+    }
+
+    /// <summary>Maps every VRAM_DESC hash (u64 @ vramBase+56) to its texPath (@ vramBase+112).</summary>
+    static Dictionary<ulong, string> BuildVramHashMap(
+        byte[] data, Page[] pages, int pageCt, bool isTLOU2)
+    {
+        const int VRAM_HEADER_SZ = 16;
+        int vramExtra = isTLOU2 ? VRAM_HEADER_SZ : 0;
+        var map = new Dictionary<ulong, string>();
+
+        for (int p = 0; p < pageCt; p++)
+        {
+            int start = pages[p].FileOffset;
+            int nEnt  = R16(data, start + 18);
+            if (nEnt <= 0 || nEnt > 65535) continue;
+
+            int cur = start + 20;
+            for (int ph = 0; ph < nEnt; ph++)
+            {
+                if (cur + 16 > data.Length) break;
+                int riOff = (int)R32(data, cur + 8);
+                cur += 16;
+
+                int riBase = start + riOff;
+                if (riBase + 16 > data.Length) continue;
+                long typePtr = BitConverter.ToInt64(data, riBase + 8);
+                if (typePtr <= 0) continue;
+                int tOff = start + (int)typePtr;
+                if (tOff < 0 || tOff >= data.Length) continue;
+                if (ReadString(data, tOff) != "VRAM_DESC") continue;
+
+                int vb = start + riOff + vramExtra;
+                if (vb + 120 > data.Length) continue;
+                ulong hash = BitConverter.ToUInt64(data, vb + 56);
+                string texPath = ReadString(data, vb + 112);
+                if (hash != 0 && !string.IsNullOrEmpty(texPath))
+                    map[hash] = texPath;
+            }
+        }
+        return map;
+    }
+
+    /// <summary>
+    /// Resolve a submesh's material (m_material at sd+0x48) into its name + diffuse/normal texPaths.
+    /// Diffuse prefers the "BaseColor01" map, falling back to any "Color0" map (e.g. eyes); normal
+    /// prefers "Normal01". texPaths resolve through <paramref name="vrams"/> so they can be upgraded
+    /// to full resolution by NdTextureDictionary.
+    /// </summary>
+    static void ParseSubmeshMaterial(
+        byte[] data, Page[] pages, Dictionary<int, int> fixups,
+        int sd, Dictionary<ulong, string> vrams, SMDInfo smd)
+    {
+        int matAbs = ResolvePtr(data, pages, fixups, sd + 0x48);
+        if (matAbs < 0) return;
+
+        int shaderNameOffs = ResolvePtr(data, pages, fixups, matAbs + 0x00);
+        if (shaderNameOffs >= 0)
+        {
+            string matName = ReadString(data, shaderNameOffs);
+            // "actor97/ellie/pants-uv:instance..." → "pants-uv"
+            int colon = matName.IndexOf(':');
+            if (colon >= 0) matName = matName[..colon];
+            int slash = matName.LastIndexOfAny(new[] { '/', '\\' });
+            if (slash >= 0) matName = matName[(slash + 1)..];
+            smd.MaterialName = matName;
+        }
+
+        int texList = ResolvePtr(data, pages, fixups, matAbs + 0x20);
+        int texCount = (int)R32(data, matAbs + 0x114);
+        if (texList < 0 || texCount <= 0 || texCount > 256) return;
+
+        string fallbackDiffuse = "";
+        for (int j = 0; j < texCount; j++)
+        {
+            int entry   = texList + 48 * j;
+            int nameAbs = ResolvePtr(data, pages, fixups, entry + 0x00);
+            if (nameAbs < 0) continue;
+            string texName = ReadString(data, nameAbs);
+
+            int sub = ResolvePtr(data, pages, fixups, entry + 0x18);
+            if (sub < 0 || sub + 16 > data.Length) continue;
+            ulong vramHash = BitConverter.ToUInt64(data, sub + 8);
+            if (!vrams.TryGetValue(vramHash, out string? texPath) || string.IsNullOrEmpty(texPath))
+                continue;
+
+            if (texName.Contains("BaseColor01"))
+            {
+                if (smd.DiffuseTexturePath.Length == 0) smd.DiffuseTexturePath = texPath;
+            }
+            else if (fallbackDiffuse.Length == 0 && texName.Contains("Color0"))
+            {
+                fallbackDiffuse = texPath;
+            }
+
+            if (texName.Contains("Normal01") && smd.NormalTexturePath.Length == 0)
+                smd.NormalTexturePath = texPath;
+        }
+
+        if (smd.DiffuseTexturePath.Length == 0) smd.DiffuseTexturePath = fallbackDiffuse;
+    }
+
     class SMDInfo
     {
         public string Name = "";
@@ -736,5 +867,9 @@ public static class NdPakMeshParser
         public int   UvBufAbs = -1;
         public byte  UvSz0, UvSz1;
         public float UvScU, UvScV, UvOfU, UvOfV;
+        // Material (resolved from m_material at SMD+0x48)
+        public string MaterialName       = "";
+        public string DiffuseTexturePath = "";
+        public string NormalTexturePath  = "";
     }
 }
