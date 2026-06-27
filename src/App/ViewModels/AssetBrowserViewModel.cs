@@ -146,8 +146,14 @@ public partial class AssetBrowserViewModel : ObservableObject
         {
             var allAssets = await _engine.GetAllAssetsAsync();
             _allAssets = allAssets;
-            BuildFileTree(allAssets);
-            BuildAssetGroups(allAssets);
+
+            // Build the tree + type groups off the UI thread (860k-file games would otherwise
+            // freeze the window for the whole build), then assign on the UI thread.
+            StatusMessage = $"Indexing {allAssets.Count:N0} assets…";
+            var built = await Task.Run(() =>
+                (Tree: BuildFileTreeCore(allAssets), Groups: BuildAssetGroupsCore(allAssets)));
+            RootNodes = built.Tree;
+            AssetGroups = built.Groups;
             FilteredAssets = allAssets.ToList();
 
             if (_engine is NaughtyDogPlugin nd2 && nd2.IsTexDictLoaded)
@@ -443,9 +449,10 @@ public partial class AssetBrowserViewModel : ObservableObject
         ApplyFilter();
     }
 
-    private void BuildAssetGroups(IReadOnlyList<AssetInfo> assets)
-    {
-        AssetGroups = assets
+    private void BuildAssetGroups(IReadOnlyList<AssetInfo> assets) => AssetGroups = BuildAssetGroupsCore(assets);
+
+    private static List<AssetGroupNode> BuildAssetGroupsCore(IReadOnlyList<AssetInfo> assets) =>
+        assets
             .GroupBy(a => a.Type)
             .OrderBy(g => TypeDisplayOrder(g.Key))
             .Select(g => new AssetGroupNode
@@ -455,7 +462,6 @@ public partial class AssetBrowserViewModel : ObservableObject
                 Assets    = g.OrderBy(a => a.Name).ToList()
             })
             .ToList();
-    }
 
     private static int TypeDisplayOrder(AssetType t) => t switch
     {
@@ -487,7 +493,9 @@ public partial class AssetBrowserViewModel : ObservableObject
 
     // ─── File Tree Building ───────────────────────────────────────────────────
 
-    private void BuildFileTree(IReadOnlyList<AssetInfo> assets)
+    private void BuildFileTree(IReadOnlyList<AssetInfo> assets) => RootNodes = BuildFileTreeCore(assets);
+
+    private List<AssetTreeNode> BuildFileTreeCore(IReadOnlyList<AssetInfo> assets)
     {
         var root = new AssetTreeNode { Name = _gameConfig.DisplayName, IsFolder = true };
 
@@ -496,14 +504,15 @@ public partial class AssetBrowserViewModel : ObservableObject
             var parts = asset.VirtualPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
             var current = root;
 
-            // Walk/create the folder path
+            // Walk/create the folder path using a per-folder index for O(1) lookups.
             for (int i = 0; i < parts.Length - 1; i++)
             {
-                var child = current.Children.FirstOrDefault(c => c.Name == parts[i] && c.IsFolder);
-                if (child == null)
+                current.FolderIndex ??= new Dictionary<string, AssetTreeNode>(StringComparer.OrdinalIgnoreCase);
+                if (!current.FolderIndex.TryGetValue(parts[i], out var child))
                 {
                     child = new AssetTreeNode { Name = parts[i], IsFolder = true };
                     current.Children.Add(child);
+                    current.FolderIndex[parts[i]] = child;
                 }
                 current = child;
             }
@@ -517,7 +526,7 @@ public partial class AssetBrowserViewModel : ObservableObject
             });
         }
 
-        RootNodes = new List<AssetTreeNode> { root };
+        return new List<AssetTreeNode> { root };
     }
 }
 
@@ -559,6 +568,13 @@ public class AssetTreeNode
     public AssetInfo? Asset { get; set; }
     public List<AssetTreeNode> Children { get; set; } = new();
     public bool IsExpanded { get; set; }
+
+    /// <summary>
+    /// Build-time only: O(1) child-folder lookup keyed by folder name. Lets BuildFileTree run in
+    /// O(n) instead of a linear Children scan per path segment — essential at 860k-file scale.
+    /// Not part of the bound view model.
+    /// </summary>
+    internal Dictionary<string, AssetTreeNode>? FolderIndex;
 }
 
 /// <summary>
