@@ -67,7 +67,24 @@ public partial class AddGameDialog : Window
         {
             TxtGameDir.Text = dialog.SelectedPath;
             TryAutoDetectEngine(dialog.SelectedPath);
+            AutoSelectPresetFromDirectory();
         }
+    }
+
+    /// <summary>
+    /// FModel-style game auto-detect: if the chosen directory matches a known UE preset
+    /// (e.g. a Jedi game), select it so the correct EGame serialization is applied on save.
+    /// No-op when editing an existing config or when the engine isn't UE.
+    /// </summary>
+    private void AutoSelectPresetFromDirectory()
+    {
+        if (_existingConfig != null) return;
+        if (CmbEngine.SelectedItem is not IGameEngine eng || eng.EngineId != "UE") return;
+        if (CmbPreset.ItemsSource == null) return;
+
+        var detected = UeGamePresets.GuessFromDirectory(TxtGameDir.Text);
+        if (detected != null)
+            CmbPreset.SelectedItem = detected.DisplayName; // fires OnPresetSelectionChanged → sets version + EGame
     }
 
     private void TryAutoDetectEngine(string path)
@@ -143,6 +160,10 @@ public partial class AddGameDialog : Window
             UpdatePresetHint(preset);
             _suppressPresetChange = false;
         }
+
+        // New game: auto-detect the preset from the chosen directory (FModel-style)
+        if (isUe && _existingConfig == null)
+            AutoSelectPresetFromDirectory();
     }
 
     private void PopulatePresetDropdown()

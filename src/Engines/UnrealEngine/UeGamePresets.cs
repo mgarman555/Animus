@@ -17,16 +17,18 @@ public static class UeGamePresets
         string EngineVersion,    // base UE version for the version dropdown
         string EGameValue,       // CUE4Parse EGame enum name, e.g. "GAME_StarWarsJediSurvivor"
         bool   RequiresAesKey,
-        string? Hint);
+        string? Hint,
+        string[]? DetectTokens = null);  // all-lowercase path tokens that, if ALL present in the
+                                         // game directory, auto-select this preset (FModel-style detect)
 
     /// <summary>Curated list of presets. Order shown in the picker.</summary>
     public static readonly IReadOnlyList<Preset> All = new[]
     {
         // Star Wars Jedi series — Respawn UE with custom serialization
-        new Preset("Star Wars Jedi: Survivor",     "4.26", "GAME_StarWarsJediSurvivor",     true,
-            "Requires AES key. Path: …\\SwGame\\Content\\Paks"),
-        new Preset("Star Wars Jedi: Fallen Order", "4.21", "GAME_StarWarsJediFallenOrder", true,
-            "Requires AES key. Path: …\\SwGame\\Content\\Paks"),
+        new Preset("Star Wars Jedi: Survivor",     "4.26", "GAME_StarWarsJediSurvivor",     false,
+            "Mounts the SwGame\\Content\\Paks tree (no AES key needed).", new[] { "jedi", "survivor" }),
+        new Preset("Star Wars Jedi: Fallen Order", "4.21", "GAME_StarWarsJediFallenOrder", false,
+            "Mounts the SwGame\\Content\\Paks tree (no AES key needed).", new[] { "jedi", "fallen" }),
 
         // Hellblade
         new Preset("Senua's Saga: Hellblade II",   "5.3",  "GAME_HellbladeSenuasSaga",      false,
@@ -61,5 +63,17 @@ public static class UeGamePresets
         if (config.EngineSpecificSettings.TryGetValue("EGame", out var eg) && !string.IsNullOrEmpty(eg))
             return All.FirstOrDefault(p => p.EGameValue == eg);
         return null;
+    }
+
+    /// <summary>
+    /// Guess a preset from the chosen game directory by matching its <see cref="Preset.DetectTokens"/>
+    /// against the path (FModel-style auto-detect). Returns the first preset whose tokens all appear.
+    /// </summary>
+    public static Preset? GuessFromDirectory(string? gameDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(gameDirectory)) return null;
+        var lower = gameDirectory.Replace('\\', '/').ToLowerInvariant();
+        return All.FirstOrDefault(p =>
+            p.DetectTokens is { Length: > 0 } tokens && tokens.All(t => lower.Contains(t)));
     }
 }
