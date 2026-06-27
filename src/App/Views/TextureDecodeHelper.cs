@@ -54,15 +54,19 @@ internal static class TextureDecodeHelper
 
     private static byte[]? DecodeBC(byte[] data, int w, int h, string format)
     {
-        var fmt = format.ToUpperInvariant() switch
+        // CUE4Parse reports EPixelFormat names like "PF_BC5" / "PF_DXT5"; strip the prefix.
+        var norm = format.ToUpperInvariant();
+        if (norm.StartsWith("PF_")) norm = norm[3..];
+
+        var fmt = norm switch
         {
-            "DXT1" or "BC1" => CompressionFormat.Bc1,
-            "DXT3" or "BC2" => CompressionFormat.Bc2,
-            "DXT5" or "BC3" => CompressionFormat.Bc3,
-            "BC4"           => CompressionFormat.Bc4,
-            "BC5"           => CompressionFormat.Bc5,
-            "BC6H"          => CompressionFormat.Bc6S,
-            "BC7"           => CompressionFormat.Bc7,
+            "DXT1" or "BC1"            => CompressionFormat.Bc1,
+            "DXT3" or "BC2"            => CompressionFormat.Bc2,
+            "DXT5" or "BC3"            => CompressionFormat.Bc3,
+            "BC4" or "ATI1N"           => CompressionFormat.Bc4,
+            "BC5" or "ATI2N"           => CompressionFormat.Bc5,
+            "BC6H"                     => CompressionFormat.Bc6S,
+            "BC7"                      => CompressionFormat.Bc7,
             _ => CompressionFormat.Unknown
         };
         if (fmt == CompressionFormat.Unknown) return null;
@@ -70,12 +74,27 @@ internal static class TextureDecodeHelper
         var decoder = new BcDecoder();
         var colors  = decoder.DecodeRaw(data, w, h, fmt);
         var rgba    = new byte[w * h * 4];
+
+        // BC5 stores only X/Y of a tangent-space normal; reconstruct Z into blue so normal
+        // maps display as proper blue/purple (and are usable), exactly like FModel.
+        bool isNormalBc5 = norm is "BC5" or "ATI2N";
         for (int i = 0; i < colors.Length; i++)
         {
-            rgba[i * 4 + 0] = colors[i].r;
-            rgba[i * 4 + 1] = colors[i].g;
-            rgba[i * 4 + 2] = colors[i].b;
-            rgba[i * 4 + 3] = colors[i].a;
+            byte r = colors[i].r, g = colors[i].g;
+            rgba[i * 4 + 0] = r;
+            rgba[i * 4 + 1] = g;
+            if (isNormalBc5)
+            {
+                float nx = r / 127.5f - 1f, ny = g / 127.5f - 1f;
+                float nz = (float)Math.Sqrt(Math.Max(0f, 1f - nx * nx - ny * ny));
+                rgba[i * 4 + 2] = (byte)((nz * 0.5f + 0.5f) * 255f);
+                rgba[i * 4 + 3] = 255;
+            }
+            else
+            {
+                rgba[i * 4 + 2] = colors[i].b;
+                rgba[i * 4 + 3] = colors[i].a;
+            }
         }
         return rgba;
     }

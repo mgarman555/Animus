@@ -168,7 +168,7 @@ public class PngTextureExporter : IExporter
         return rgba;
     }
 
-    private static CompressionFormat MapToCompressionFormat(string ueFormat) => ueFormat.ToUpperInvariant() switch
+    private static CompressionFormat MapToCompressionFormat(string ueFormat) => Normalize(ueFormat) switch
     {
         "DXT1" or "BC1" => CompressionFormat.Bc1,
         "DXT3" or "BC2" => CompressionFormat.Bc2,
@@ -181,6 +181,13 @@ public class PngTextureExporter : IExporter
         "ATF_RGBA_DXT5" => CompressionFormat.Bc3,
         _ => CompressionFormat.Unknown
     };
+
+    /// <summary>CUE4Parse reports EPixelFormat names like "PF_BC5"; strip the prefix for matching.</summary>
+    private static string Normalize(string ueFormat)
+    {
+        var f = ueFormat.ToUpperInvariant();
+        return f.StartsWith("PF_") ? f[3..] : f;
+    }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
