@@ -32,6 +32,8 @@ public class JsonMetadataExporter : IExporter
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        ReferenceHandler = ReferenceHandler.IgnoreCycles,
+        MaxDepth = 64,
         Converters = { new JsonStringEnumConverter() }
     };
 
@@ -109,7 +111,7 @@ public class JsonMetadataExporter : IExporter
             CompressedSize = data.Info.CompressedSize,
             UncompressedSize = data.Info.UncompressedSize,
             SourceArchive = Path.GetFileName(data.Info.ArchivePath),
-            Properties = settings.IncludeAllProperties ? data.RawProperties : null
+            Properties = settings.IncludeAllProperties ? SanitizeProperties(data.RawProperties) : null
         };
 
         // Add type-specific metadata
@@ -174,6 +176,32 @@ public class JsonMetadataExporter : IExporter
 
         return doc;
     }
+
+    /// <summary>
+    /// RawProperties values from engine plugins (esp. CUE4Parse) can be arbitrary objects
+    /// (FName, structs, object refs) that System.Text.Json can't serialize — and which threw,
+    /// failing the whole export. Keep JSON primitives as-is and stringify everything else so the
+    /// sidecar always writes. Structured mesh/texture detail is captured separately above.
+    /// </summary>
+    private static Dictionary<string, object?>? SanitizeProperties(Dictionary<string, object?>? props)
+    {
+        if (props == null) return null;
+        var safe = new Dictionary<string, object?>(props.Count);
+        foreach (var (k, v) in props)
+        {
+            try { safe[k] = ToJsonSafe(v); }
+            catch { safe[k] = null; }
+        }
+        return safe;
+    }
+
+    private static object? ToJsonSafe(object? v) => v switch
+    {
+        null => null,
+        string or bool or int or long or short or byte or float or double or decimal or uint or ulong => v,
+        Enum e => e.ToString(),
+        _ => v.ToString()
+    };
 
     private static string BuildOutputPath(AssetInfo info, string outputDir, ExportSettings settings)
     {
