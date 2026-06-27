@@ -7,6 +7,7 @@ using CUE4Parse.UE4.Assets.Exports.Animation;
 using CUE4Parse.UE4.Assets.Exports.Sound;
 using CUE4Parse.UE4.Objects.Core.Misc;
 using CUE4Parse.Encryption.Aes;
+using CUE4Parse.Compression;
 using CUE4Parse.UE4.Versions;
 using CUE4Parse_Conversion.Meshes;
 using CUE4Parse_Conversion.Meshes.PSK;
@@ -78,10 +79,93 @@ public class UnrealEnginePlugin : IGameEngine
         }
     }
 
+    // ── Native compression codecs (Oodle / Zlib) ───────────────────────────────
+    // Initialized once per process. Required to decompress packaged UE assets.
+
+    private static bool _compressionInit;
+    private static readonly SemaphoreSlim _compressionLock = new(1, 1);
+
+    private static async Task EnsureCompressionAsync(string gameDirectory, IProgress<string>? progress)
+    {
+        if (_compressionInit) return;
+        await _compressionLock.WaitAsync();
+        try
+        {
+            if (_compressionInit) return;
+
+            // ── Oodle (the Jedi titles and most modern UE games use it) ──
+            // Prefer the game's own oo2core DLL (offline, exact-version match); otherwise
+            // download the CUE4Parse-expected build into our app data, exactly like FModel.
+            string? oodle = FindGameOodle(gameDirectory);
+            if (oodle == null)
+            {
+                var dl = Path.Combine(DataDir(), OodleHelper.OODLE_DLL_NAME);
+                if (!File.Exists(dl))
+                {
+                    progress?.Report("Downloading Oodle decompressor…");
+                    await OodleHelper.DownloadOodleDllAsync(dl);
+                }
+                oodle = dl;
+            }
+            OodleHelper.Initialize(oodle);
+            Console.WriteLine($"[UE] Oodle initialized: {oodle}");
+
+            // ── Zlib (best-effort — some UE paks use it; non-fatal if unavailable offline) ──
+            try
+            {
+                var zlib = Path.Combine(DataDir(), ZlibHelper.DLL_NAME);
+                if (!File.Exists(zlib)) await ZlibHelper.DownloadDllAsync(zlib);
+                ZlibHelper.Initialize(zlib);
+            }
+            catch (Exception ex) { Console.WriteLine($"[UE] Zlib init skipped: {ex.Message}"); }
+
+            _compressionInit = true;
+        }
+        catch (Exception ex) { Console.WriteLine($"[UE] Compression init failed: {ex.Message}"); }
+        finally { _compressionLock.Release(); }
+    }
+
+    private static string DataDir()
+    {
+        var dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "GameAssetExplorer", ".data");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    /// <summary>Locate the oo2core_*_win64.dll the game ships (UE layout: Engine/Binaries/ThirdParty/Oodle/Win64).</summary>
+    private static string? FindGameOodle(string gameDirectory)
+    {
+        if (string.IsNullOrEmpty(gameDirectory) || !Directory.Exists(gameDirectory)) return null;
+
+        var fast = new[]
+        {
+            Path.Combine(gameDirectory, "Engine", "Binaries", "ThirdParty", "Oodle", "Win64"),
+            Path.Combine(gameDirectory, "Engine", "Binaries", "Win64"),
+        };
+        foreach (var d in fast)
+            if (Directory.Exists(d))
+                foreach (var f in Directory.EnumerateFiles(d, "oo2core_*_win64.dll"))
+                    return f;
+
+        // Bounded fallback: search only under Engine/Binaries so we don't walk the whole install.
+        var eng = Path.Combine(gameDirectory, "Engine", "Binaries");
+        if (Directory.Exists(eng))
+            foreach (var f in SafeEnumerateFiles(eng, "oo2core_*_win64.dll"))
+                return f;
+        return null;
+    }
+
     public async Task<bool> MountGameAsync(GameConfig config, IProgress<string>? progress = null)
     {
         _currentConfig = config;
         progress?.Report("Locating game archives…");
+
+        // CUE4Parse can't decompress Oodle/Zlib-packed UE assets until the native codecs are
+        // initialized — without this, mounting works but every LoadPackage throws
+        // "Oodle decompression failed: not initialized". FModel does the same on startup.
+        await EnsureCompressionAsync(config.GameDirectory, progress);
 
         var paksDir = FindPaksDirectory(config.GameDirectory);
         if (paksDir == null)
@@ -176,12 +260,20 @@ public class UnrealEnginePlugin : IGameEngine
         if (_provider == null)
             throw new InvalidOperationException("No game is currently mounted.");
 
-        var pkg        = await _provider.LoadPackageAsync(asset.VirtualPath);
-        var exports    = pkg?.GetExports();
-        var mainExport = exports?.FirstOrDefault();
+        var pkg     = await _provider.LoadPackageAsync(asset.VirtualPath);
+        var exports = pkg?.GetExports()?.ToList();
 
-        if (mainExport == null)
+        if (exports == null || exports.Count == 0)
             throw new Exception($"Could not load asset: {asset.VirtualPath}");
+
+        // Pick the primary asset export — the first one we have a typed loader for.
+        // Packages frequently list sub-objects first (e.g. a StaticMesh's BodySetup, a
+        // mesh's Skeleton/PhysicsAsset), so exports[0] is often not the asset the user
+        // picked. FModel resolves the main export the same way.
+        var mainExport =
+            exports.FirstOrDefault(e => e is UTexture2D or UStaticMesh or USkeletalMesh
+                                          or UAnimSequence or USoundWave)
+            ?? exports[0];
 
         return mainExport switch
         {
