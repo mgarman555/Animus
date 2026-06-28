@@ -402,8 +402,13 @@ public partial class AssetBrowserViewModel : ObservableObject
                     break;
 
                 case MeshAssetData:
-                    var objExporter = new ObjModelExporter();
-                    exportTasks.Add(objExporter.ExportAsync(asset, outputDirectory, ExportSettings));
+                    IExporter modelExporter = ExportSettings.ModelFormat switch
+                    {
+                        ModelExportFormat.Obj => new ObjModelExporter(),
+                        ModelExportFormat.Fbx => new FbxModelExporter(),
+                        _                     => new GltfModelExporter(), // glTF: Blender + UE native
+                    };
+                    exportTasks.Add(modelExporter.ExportAsync(asset, outputDirectory, ExportSettings));
                     break;
             }
 
