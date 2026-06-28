@@ -9,6 +9,7 @@ using GameAssetExplorer.Exporters.MetadataExporter;
 using GameAssetExplorer.Exporters.ModelExporter;
 using GameAssetExplorer.Exporters.TextureExporter;
 using System.Collections.ObjectModel;
+using System.IO;
 
 namespace GameAssetExplorer.App.ViewModels;
 
@@ -391,33 +392,43 @@ public partial class AssetBrowserViewModel : ObservableObject
 
         var exportTasks = new List<Task>();
 
+        // Normalized layout: Output/[Game]/[Category]/[AssetName]/  (model + meta, textures in Textures/).
+        // Each asset gets its own folder, so paths are flat within it (no virtual-path mirroring).
+        var flat = ExportSettings.Clone();
+        flat.PreserveVirtualPaths = false;
+        string gameDir = NormalizePart(_gameConfig.DisplayName);
+
         foreach (var asset in assets)
         {
-            // Run the right exporter(s) based on asset type
+            string assetDir = Path.Combine(outputDirectory, gameDir,
+                CategoryFolder(asset.Info.Type), NormalizePart(asset.Info.Name));
+            Directory.CreateDirectory(assetDir);
+
             switch (asset)
             {
                 case TextureAssetData:
-                    var textureExporter = new PngTextureExporter();
-                    exportTasks.Add(textureExporter.ExportAsync(asset, outputDirectory, ExportSettings));
+                    exportTasks.Add(new PngTextureExporter()
+                        .ExportAsync(asset, Path.Combine(assetDir, "Textures"), flat));
                     break;
 
                 case MeshAssetData:
-                    IExporter modelExporter = ExportSettings.ModelFormat switch
+                    IExporter modelExporter = flat.ModelFormat switch
                     {
                         ModelExportFormat.Obj => new ObjModelExporter(),
                         ModelExportFormat.Fbx => new FbxModelExporter(),
                         _                     => new GltfModelExporter(), // glTF: Blender + UE native
                     };
-                    exportTasks.Add(modelExporter.ExportAsync(asset, outputDirectory, ExportSettings));
+                    exportTasks.Add(modelExporter.ExportAsync(asset, assetDir, flat));
+                    break;
+
+                case AudioAssetData audio:
+                    exportTasks.Add(WriteRawAudioAsync(audio, assetDir));
                     break;
             }
 
-            // JSON metadata always goes out alongside the main asset
-            if (ExportSettings.ExportMetadataJson)
-            {
-                var metaExporter = new JsonMetadataExporter();
-                exportTasks.Add(metaExporter.ExportAsync(asset, outputDirectory, ExportSettings));
-            }
+            // JSON metadata sidecar alongside the asset
+            if (flat.ExportMetadataJson)
+                exportTasks.Add(new JsonMetadataExporter().ExportAsync(asset, assetDir, flat));
         }
 
         try
@@ -452,6 +463,39 @@ public partial class AssetBrowserViewModel : ObservableObject
     {
         _folderScope = assets;
         ApplyFilter();
+    }
+
+    // ─── Normalized export helpers ────────────────────────────────────────────
+
+    private static string CategoryFolder(AssetType t) => t switch
+    {
+        AssetType.Texture                              => "Textures",
+        AssetType.StaticMesh or AssetType.SkeletalMesh => "Meshes",
+        AssetType.Animation                            => "Animations",
+        AssetType.Audio                                => "Audio",
+        AssetType.Material                             => "Materials",
+        AssetType.Level                                => "Levels",
+        _                                              => "Other"
+    };
+
+    private static string NormalizePart(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var s = new string((name ?? "").Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim();
+        return string.IsNullOrEmpty(s) ? "unnamed" : s;
+    }
+
+    private static async Task WriteRawAudioAsync(AudioAssetData audio, string assetDir)
+    {
+        var data = audio.RawAudioData;
+        if (data == null || data.Length == 0) return;
+        string ext = (audio.SourceFormat ?? "").ToLowerInvariant() switch
+        {
+            var f when f.Contains("ogg") => ".ogg",
+            var f when f.Contains("wav") => ".wav",
+            _ => ".bin"
+        };
+        await File.WriteAllBytesAsync(Path.Combine(assetDir, NormalizePart(audio.Info.Name) + ext), data);
     }
 
     private void BuildAssetGroups(IReadOnlyList<AssetInfo> assets) => AssetGroups = BuildAssetGroupsCore(assets);

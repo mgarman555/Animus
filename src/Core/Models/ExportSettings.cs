@@ -80,6 +80,10 @@ public class ExportSettings
 
     /// <summary>Overwrite existing files, or skip and keep existing ones</summary>
     public bool OverwriteExisting { get; set; } = false;
+
+    /// <summary>Shallow copy (all fields are value types/enums) — used to vary one flag per export
+    /// without mutating the shared settings instance.</summary>
+    public ExportSettings Clone() => (ExportSettings)MemberwiseClone();
 }
 
 public enum TextureExportFormat { Png, Tga, Dds }
