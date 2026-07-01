@@ -73,33 +73,46 @@ public partial class AssetBrowserView : UserControl
         // No automatic viewer — double-click required
     }
 
+    // Double-click in the center type-grouped list.
     private async void OnAssetTreeDoubleClick(object sender, MouseButtonEventArgs e)
     {
         if (_vm?.SelectedAsset is not AssetInfo asset) return;
-
         e.Handled = true;
+        await OpenViewerForSelectedAsync(asset);
+    }
 
-        // Ensure asset is loaded
+    // Double-click a file leaf in the left folder tree opens the same viewer.
+    private async void OnFileTreeDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (_vm == null) return;
+        if (FileTree.SelectedItem is not AssetTreeNode node || node.IsFolder || node.Asset == null)
+            return; // folders keep their default expand/collapse behaviour
+        e.Handled = true;
+        _vm.SelectedAsset = node.Asset;
+        await OpenViewerForSelectedAsync(node.Asset);
+    }
+
+    /// <summary>
+    /// Load the asset (if needed) and open the right window based on the ACTUALLY DECODED type:
+    /// a mesh → 3D viewer, a texture → image preview, anything else → the inspector. Routing on the
+    /// decoded type (not the listing-time heuristic) means a mesh mis-classified as Unknown still
+    /// opens the 3D viewer.
+    /// </summary>
+    private async Task OpenViewerForSelectedAsync(AssetInfo asset)
+    {
+        if (_vm == null) return;
+
         await _vm.PreviewSelectedAssetCommand.ExecuteAsync(null);
         RefreshPreviewPanel();
 
-        // Route to the right viewer based on asset type. Anything without a dedicated
-        // viewer falls through to the generic Inspector window.
-        switch (asset.Type)
+        switch (_vm.PreviewedAsset)
         {
-            case AssetType.Texture:
-                if (_vm.PreviewedAsset is TextureAssetData tex)
-                    OpenTexturePreview(tex);
-                else
-                    OpenInspector(_vm.PreviewedAsset, asset);
+            case TextureAssetData tex:
+                OpenTexturePreview(tex);
                 break;
-
-            case AssetType.SkeletalMesh:
-            case AssetType.StaticMesh:
-            case AssetType.Level:
-                OpenMeshViewer(_vm.PreviewedAsset, asset);
+            case MeshAssetData mesh:
+                OpenMeshViewer(mesh, asset);
                 break;
-
             default:
                 OpenInspector(_vm.PreviewedAsset, asset);
                 break;

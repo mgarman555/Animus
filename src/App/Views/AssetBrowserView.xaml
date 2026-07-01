@@ -114,7 +114,8 @@
                           VirtualizingStackPanel.IsVirtualizing="True"
                           VirtualizingStackPanel.VirtualizationMode="Recycling"
                           BorderThickness="0,0,1,0"
-                          SelectedItemChanged="OnTreeSelectionChanged">
+                          SelectedItemChanged="OnTreeSelectionChanged"
+                          MouseDoubleClick="OnFileTreeDoubleClick">
                     <TreeView.ItemTemplate>
                         <HierarchicalDataTemplate DataType="{x:Type vm:AssetTreeNode}"
                                                   ItemsSource="{Binding Children}">
