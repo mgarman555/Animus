@@ -5,6 +5,21 @@ Read `CLAUDE.md` (project guide) and `design/SESSION_NOTES.md` (full Cowork sess
 
 ---
 
+## Build/verify environment (updated 2026-07-08)
+
+The **Linux sandbox CAN build and unit-test** the non-WPF projects. `dotnet` isn't preinstalled,
+but `~/.dotnet` holds an SDK installed via `dotnet-install.sh` (`export PATH="$PATH:$HOME/.dotnet"`).
+As of Phase 0 all 8 non-App projects target **`net8.0`** (was `net8.0-windows`) and build + test here:
+```bash
+export PATH="$PATH:$HOME/.dotnet"
+dotnet build src/Core/Core.csproj
+dotnet test  src/Tests/Tests.csproj      # xunit, no mocks — real in-memory AssetData
+```
+Only `src/App` (WPF) still needs Windows to build/run. CUE4Parse is now **pinned** (`1.2.2` +
+Conversion `1.2.1`) because the floating `*` resolved to a net10.0-only dated build that broke restore.
+The Blender/UE round-trip validation still happens on the Windows PC; the sandbox covers parsers,
+exporters (incl. the coming binary-FBX writer via round-trip tests), and format probes in `tools/`.
+
 ## TL;DR of where things stand
 
 - The app is a working C# .NET 8 WPF multi-game asset explorer (UE / TLOU2 / RAGE / SOTR plugins).

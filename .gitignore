@@ -9,3 +9,6 @@ obj/
 
 # Handoff artifacts (bundle is a copy of history; no need to track)
 handoff/
+
+# Real game-asset samples used by tests/probes — large, and game content we don't redistribute
+test-assets/

@@ -117,6 +117,37 @@ public class LodData
     public byte[]? UvBuffer { get; set; }
 
     /// <summary>
+    /// Per-vertex normals — 3 floats/vertex (x,y,z), parallel to the vertex buffer.
+    /// Null = exporters fall back to recomputing normals from face geometry.
+    /// </summary>
+    public float[]? Normals { get; set; }
+
+    /// <summary>
+    /// Per-vertex tangents — 4 floats/vertex (x,y,z, w=handedness sign). Optional; null if the
+    /// source didn't provide them.
+    /// </summary>
+    public float[]? Tangents { get; set; }
+
+    /// <summary>
+    /// Skin bone indices — <see cref="InfluencesPerVertex"/> entries per vertex, parallel to
+    /// <see cref="BoneWeights"/>. Indices point into the mesh's <see cref="SkeletonData.Bones"/> list.
+    /// ushort because UE5 skeletons can exceed 255 bones. Null = unrigged geometry.
+    /// </summary>
+    public ushort[]? BoneIndices { get; set; }
+
+    /// <summary>
+    /// Skin weights — <see cref="InfluencesPerVertex"/> entries per vertex, parallel to
+    /// <see cref="BoneIndices"/>, normalized so each vertex's weights sum to ~1. Null = unrigged.
+    /// </summary>
+    public float[]? BoneWeights { get; set; }
+
+    /// <summary>
+    /// Number of bone influences stored per vertex in <see cref="BoneIndices"/>/<see cref="BoneWeights"/>.
+    /// 4 is typical; UE high-precision skins use 8. Zero-weight slots are padded with weight 0.
+    /// </summary>
+    public int InfluencesPerVertex { get; set; } = 4;
+
+    /// <summary>
     /// Original submesh boundaries within the merged buffers.
     /// Empty list = treat the whole LOD as a single unnamed submesh.
     /// </summary>
@@ -188,6 +219,54 @@ public class BoundingBox
     public float[] Max { get; set; } = new float[3];
 }
 
+/// <summary>
+/// A standalone skeleton / armature asset (UE USkeleton, ND JOINT_HIERARCHY, Unity Avatar).
+/// Distinct from a skeletal mesh: no geometry, just the bone hierarchy + bind pose.
+/// </summary>
+public class SkeletonAssetData : AssetData
+{
+    public SkeletonData Skeleton { get; set; } = new();
+}
+
+/// <summary>
+/// A material / material-instance: the parameter values that drive a shader, plus which
+/// textures are bound to which slots. Lets the exporter/inspector resolve a mesh's textures.
+/// </summary>
+public class MaterialAssetData : AssetData
+{
+    /// <summary>Parent material (for instances), e.g. "/Game/Materials/M_Character". Empty if none.</summary>
+    public string ParentPath { get; set; } = string.Empty;
+
+    /// <summary>Named texture parameters → referenced texture asset path (e.g. "BaseColor" → "/Game/.../T_Body_D").</summary>
+    public Dictionary<string, string> TextureParams { get; set; } = new();
+
+    /// <summary>Named scalar parameters → value (e.g. "Roughness" → 0.5).</summary>
+    public Dictionary<string, float> ScalarParams { get; set; } = new();
+
+    /// <summary>Named vector/color parameters → RGBA components.</summary>
+    public Dictionary<string, float[]> VectorParams { get; set; } = new();
+}
+
+/// <summary>
+/// A level / map / world: a list of placed mesh instances with their transforms. Referenced
+/// meshes are loaded separately (by path) and combined by the level exporter.
+/// </summary>
+public class LevelAssetData : AssetData
+{
+    public List<PlacedInstance> Instances { get; set; } = new();
+}
+
+/// <summary>One placed static-mesh instance inside a level, with its world transform.</summary>
+public class PlacedInstance
+{
+    public string Name { get; set; } = string.Empty;
+    /// <summary>Asset path of the referenced mesh, resolvable via IGameEngine.LoadAssetAsync.</summary>
+    public string MeshAssetPath { get; set; } = string.Empty;
+    public float[] Position { get; set; } = new float[3];
+    public float[] RotationQuat { get; set; } = new float[4];
+    public float[] Scale { get; set; } = new float[] { 1f, 1f, 1f };
+}
+
 /// <summary>Loaded animation sequence</summary>
 public class AnimationAssetData : AssetData
 {
@@ -238,5 +317,8 @@ public enum AssetType
     StringTable,
     Font,
     ParticleSystem,
-    Other
+    Other,
+    // Appended at the end to preserve the numeric values of the members above —
+    // SotrEnginePlugin persists AssetType as a byte in its on-disk type cache.
+    Skeleton
 }

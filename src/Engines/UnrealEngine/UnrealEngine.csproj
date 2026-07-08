@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>GameAssetExplorer.UnrealEngine</AssemblyName>
@@ -17,8 +17,14 @@
       MIT licensed. This is the foundation of our Unreal support.
       https://github.com/FabianFG/CUE4Parse
     -->
-    <PackageReference Include="CUE4Parse" Version="*" />
-    <PackageReference Include="CUE4Parse-Conversion" Version="*" />
+    <!--
+      Pinned (was "*"): the auto-published dated build 1.2.2.202607 targets net10.0 only and
+      breaks restore on net8.0. CUE4Parse 1.2.2 is the last net8.0 release; CUE4Parse-Conversion
+      has no plain 1.2.2, so 1.2.1 (net8.0, depends on CUE4Parse 1.2.2) is the matching pin.
+      Bump deliberately when moving to net10.0.
+    -->
+    <PackageReference Include="CUE4Parse" Version="1.2.2" />
+    <PackageReference Include="CUE4Parse-Conversion" Version="1.2.1" />
 
     <!--
       SkiaSharp: Used for DDS->PNG texture conversion.
