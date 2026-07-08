@@ -79,6 +79,183 @@ public static class FbxSceneBuilder
     }
 
     /// <summary>
+    /// Builds an FBX document containing a skeleton plus one animation take: the bone nodes (so the
+    /// clip is self-contained and retargetable in Blender) and an AnimationStack/Layer with T/R/S
+    /// curves per animated bone. Rotation keys are quaternions in the source and are converted to
+    /// EulerXYZ per frame with unrolling so curves stay continuous across the ±180° wrap.
+    /// </summary>
+    public static List<FbxNode> BuildAnimation(SkeletonData skeleton, AnimationAssetData anim, ExportSettings settings)
+    {
+        var ids = new IdGen();
+        var objects = new FbxNode("Objects");
+        var connections = new FbxNode("Connections");
+
+        var skel = BuildSkeleton(skeleton, ids, objects, connections);
+        var boneByName = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < skel.Bones.Count; i++) boneByName[skel.Bones[i].Name] = i;
+
+        float fps = anim.FrameRate > 0 ? anim.FrameRate : 30f;
+        var (stackNodes, curveNodeCount, curveCount) = BuildTake(anim, skel, boneByName, fps, ids, objects, connections);
+
+        var top = new List<FbxNode>
+        {
+            BuildHeader(),
+            BuildGlobalSettings(false),
+            BuildAnimDefinitions(skel.BoneIds.Length, curveNodeCount, curveCount),
+            objects,
+            connections,
+        };
+        // AnimationStack/Layer live in Objects (added by BuildTake); nothing else to place.
+        _ = stackNodes;
+        return top;
+    }
+
+    // One FBX "KTime" tick = 1/46186158000 s (FbxTime resolution).
+    private const long KTimePerSecond = 46_186_158_000L;
+
+    private static (int stacks, int curveNodes, int curves) BuildTake(
+        AnimationAssetData anim, Skeleton skel, Dictionary<string, int> boneByName, float fps,
+        IdGen ids, FbxNode objects, FbxNode connections)
+    {
+        long stackId = ids.Next();
+        var stack = new FbxNode("AnimationStack", stackId, $"AnimStack::{FbxName.Sanitize(anim.Info.Name, "Take", 0)}", "");
+        int frameCount = Math.Max(anim.FrameCount, 1);
+        long stopKt = (long)Math.Round((frameCount - 1) / (double)fps * KTimePerSecond);
+        var sp70 = stack.Add("Properties70");
+        sp70.Add(P("LocalStart", "KTime", "Time", "", 0L));
+        sp70.Add(P("LocalStop", "KTime", "Time", "", stopKt));
+        objects.Add(stack);
+
+        long layerId = ids.Next();
+        var layer = new FbxNode("AnimationLayer", layerId, "AnimLayer::BaseLayer", "");
+        objects.Add(layer);
+        connections.Add("C", "OO", layerId, stackId); // layer → stack
+
+        int curveNodes = 0, curves = 0;
+        foreach (var track in anim.Tracks)
+        {
+            if (!boneByName.TryGetValue(track.BoneName, out int bi)) continue;
+            long boneId = skel.BoneIds[bi];
+
+            if (track.PositionKeys.Count > 0)
+                EmitChannel(track.PositionKeys, "Lcl Translation", boneId, layerId, fps, ids, objects, connections, ref curveNodes, ref curves);
+
+            if (track.RotationKeys.Count > 0)
+            {
+                var euler = QuatKeysToEuler(track.RotationKeys);
+                EmitChannel(euler, "Lcl Rotation", boneId, layerId, fps, ids, objects, connections, ref curveNodes, ref curves);
+            }
+
+            if (track.ScaleKeys.Count > 0)
+                EmitChannel(track.ScaleKeys, "Lcl Scaling", boneId, layerId, fps, ids, objects, connections, ref curveNodes, ref curves);
+        }
+        return (1, curveNodes, curves);
+    }
+
+    /// <summary>Emits one AnimationCurveNode (X/Y/Z) for a bone property, plus three AnimationCurves.</summary>
+    private static void EmitChannel(
+        IReadOnlyList<float[]> keys, string property, long boneId, long layerId, float fps,
+        IdGen ids, FbxNode objects, FbxNode connections, ref int curveNodes, ref int curves)
+    {
+        long nodeId = ids.Next();
+        double d0 = keys.Count > 0 ? keys[0][0] : 0, d1 = keys.Count > 0 ? keys[0][1] : 0, d2 = keys.Count > 0 ? keys[0][2] : 0;
+        var cn = new FbxNode("AnimationCurveNode", nodeId, $"AnimCurveNode::{ChannelTag(property)}", "");
+        var p = cn.Add("Properties70");
+        p.Add(P("d|X", "Number", "", "A", d0));
+        p.Add(P("d|Y", "Number", "", "A", d1));
+        p.Add(P("d|Z", "Number", "", "A", d2));
+        objects.Add(cn);
+        connections.Add("C", "OP", nodeId, boneId, property); // curve node → bone property
+        connections.Add("C", "OO", nodeId, layerId);          // curve node → layer
+        curveNodes++;
+
+        var times = new long[keys.Count];
+        for (int f = 0; f < keys.Count; f++)
+            times[f] = (long)Math.Round(f / (double)fps * KTimePerSecond);
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            var values = new float[keys.Count];
+            for (int f = 0; f < keys.Count; f++) values[f] = keys[f].Length > axis ? keys[f][axis] : 0f;
+            long curveId = EmitCurve(times, values, ids, objects);
+            connections.Add("C", "OP", curveId, nodeId, axis == 0 ? "d|X" : axis == 1 ? "d|Y" : "d|Z");
+            curves++;
+        }
+    }
+
+    private static long EmitCurve(long[] times, float[] values, IdGen ids, FbxNode objects)
+    {
+        long id = ids.Next();
+        var c = new FbxNode("AnimationCurve", id, "AnimCurve::", "");
+        c.Add("Default", 0.0);
+        c.Add("KeyVer", 4008);
+        c.Add("KeyTime").Prop(times);
+        c.Add("KeyValueFloat").Prop(values);
+        // Linear interpolation flag for every key; minimal attr arrays the importers expect.
+        c.Add("KeyAttrFlags").Prop(new[] { 0x0000010C });
+        c.Add("KeyAttrDataFloat").Prop(new float[] { 0, 0, 0, 0 });
+        c.Add("KeyAttrRefCount").Prop(new[] { times.Length });
+        objects.Add(c);
+        return id;
+    }
+
+    private static string ChannelTag(string property) => property switch
+    {
+        "Lcl Translation" => "T",
+        "Lcl Rotation" => "R",
+        "Lcl Scaling" => "S",
+        _ => "X"
+    };
+
+    /// <summary>Quaternion rotation keys → EulerXYZ degrees with per-frame unrolling for continuity.</summary>
+    private static List<float[]> QuatKeysToEuler(IReadOnlyList<float[]> quatKeys)
+    {
+        var outKeys = new List<float[]>(quatKeys.Count);
+        double px = 0, py = 0, pz = 0;
+        for (int f = 0; f < quatKeys.Count; f++)
+        {
+            var q = quatKeys[f];
+            var (x, y, z) = Mat4.QuatToEulerXyzDeg(q[0], q[1], q[2], q.Length > 3 ? q[3] : 1f);
+            if (f > 0)
+            {
+                x = Unroll(px, x);
+                y = Unroll(py, y);
+                z = Unroll(pz, z);
+            }
+            px = x; py = y; pz = z;
+            outKeys.Add(new[] { (float)x, (float)y, (float)z });
+        }
+        return outKeys;
+    }
+
+    /// <summary>Shifts <paramref name="cur"/> by 360° multiples to sit within ±180° of <paramref name="prev"/>.</summary>
+    private static double Unroll(double prev, double cur)
+    {
+        while (cur - prev > 180) cur -= 360;
+        while (cur - prev < -180) cur += 360;
+        return cur;
+    }
+
+    private static FbxNode BuildAnimDefinitions(int boneModels, int curveNodes, int curves)
+    {
+        var d = new FbxNode("Definitions");
+        d.Add("Version", 100);
+        d.Add("Count", 1 + boneModels + boneModels /*attrs*/ + 1 /*pose*/ + 1 /*armature*/ + 1 /*stack*/ + 1 /*layer*/ + curveNodes + curves);
+        d.Add("ObjectType", "GlobalSettings").Add("Count", 1);
+        if (boneModels > 0)
+        {
+            d.Add("ObjectType", "Model").Add("Count", boneModels + 1); // + armature Null
+            d.Add("ObjectType", "NodeAttribute").Add("Count", boneModels);
+            d.Add("ObjectType", "Pose").Add("Count", 1);
+        }
+        d.Add("ObjectType", "AnimationStack").Add("Count", 1);
+        d.Add("ObjectType", "AnimationLayer").Add("Count", 1);
+        if (curveNodes > 0) d.Add("ObjectType", "AnimationCurveNode").Add("Count", curveNodes);
+        if (curves > 0)     d.Add("ObjectType", "AnimationCurve").Add("Count", curves);
+        return d;
+    }
+
+    /// <summary>
     /// Builds an FBX document for a standalone skeleton (armature only, no geometry). This is the
     /// "skeleton exporter" — same bone nodes + bind pose the skinned path emits, minus meshes.
     /// </summary>
