@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>FleetView</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%230E639C'/%3E%3Ccircle cx='8' cy='8' r='3' fill='%234EC9B0'/%3E%3C/svg%3E"/>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="mark"></span> FleetView</div>
+    <div class="pills" id="pills">
+      <div class="pill working" data-k="working"><span class="dot"></span><span class="n">0</span> working</div>
+      <div class="pill ready" data-k="ready"><span class="dot"></span><span class="n">0</span> ready</div>
+      <div class="pill needs_input" data-k="needs_input"><span class="dot"></span><span class="n">0</span> needs input</div>
+      <div class="pill error" data-k="error"><span class="dot"></span><span class="n">0</span> error</div>
+    </div>
+    <div class="right">
+      <button id="alertsBtn" class="ghost" title="Enable browser notifications + sound">Enable alerts</button>
+      <span id="conn" class="conn off" title="connection">●</span>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <main id="board" class="board">
+    <div id="empty" class="empty">Waiting for agents… start the server and launch a fleet, or run <code>npm run demo</code>.</div>
+  </main>
+
+  <template id="projectTpl">
+    <section class="project">
+      <div class="phead">
+        <span class="pbar"></span>
+        <span class="pname"></span>
+        <span class="ppath"></span>
+        <span class="pcounts"></span>
+      </div>
+      <div class="cards"></div>
+    </section>
+  </template>
+
+  <template id="cardTpl">
+    <div class="card">
+      <div class="crow1">
+        <span class="sdot"></span>
+        <span class="aname"></span>
+        <span class="slabel"></span>
+        <span class="elapsed"></span>
+      </div>
+      <div class="activity"></div>
+      <div class="callout hidden"></div>
+      <div class="feed hidden"></div>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

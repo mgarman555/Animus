@@ -1,0 +1,14 @@
+{
+  "name": "fleetview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local dashboard for monitoring AI agent fleets across projects",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/server.js",
+    "demo": "node scripts/demo.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

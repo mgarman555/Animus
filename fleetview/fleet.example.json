@@ -1,0 +1,35 @@
+{
+  "port": 4700,
+  "staleMinutes": 10,
+  "projects": [
+    {
+      "name": "animus",
+      "path": "C:/dev/Animus",
+      "color": "#0E639C",
+      "agents": [
+        {
+          "name": "refactorer",
+          "type": "claude-code",
+          "args": ["--permission-mode", "acceptEdits"],
+          "prompt": "Continue the refactor plan in PLAN.md"
+        },
+        {
+          "name": "tester",
+          "type": "claude-code"
+        }
+      ]
+    },
+    {
+      "name": "scrapers",
+      "path": "C:/dev/scrapers",
+      "color": "#4EC9B0",
+      "agents": [
+        {
+          "name": "crawler",
+          "type": "sdk",
+          "cmd": "python agents/crawler.py"
+        }
+      ]
+    }
+  ]
+}
