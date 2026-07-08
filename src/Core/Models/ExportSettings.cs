@@ -19,10 +19,10 @@ public class ExportSettings
 
     // ─── Model Settings ───────────────────────────────────────────────────────
 
-    /// <summary>Primary model export format. glTF is the default — self-contained (Assimp writes it)
-    /// and imported natively by both Blender and UE5. (FBX export is ASCII-only here, which Blender
-    /// can't read; OBJ loses skeleton/materials.)</summary>
-    public ModelExportFormat ModelFormat { get; set; } = ModelExportFormat.GlTf;
+    /// <summary>Primary model export format. FBX (binary) is the default and the pipeline backbone —
+    /// it carries geometry, skeleton, skin weights and animation for the extract → Blender → UE loop.
+    /// glTF remains available (Assimp-written, unskinned); OBJ loses skeleton/materials.</summary>
+    public ModelExportFormat ModelFormat { get; set; } = ModelExportFormat.Fbx;
 
     /// <summary>
     /// Which LOD to export. -1 = LOD0 (highest quality).

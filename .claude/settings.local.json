@@ -31,7 +31,10 @@
       "Bash(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\madie\\\\Desktop\\\\diag8.ps1\")",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\madie\\\\Desktop\\\\Personal\\\\GameAssetExplorer\\\\src\\\\App\\\\\" -Recurse -Name *.xaml)",
       "PowerShell($exePath = \"C:\\\\Users\\\\madie\\\\Desktop\\\\Personal\\\\GameAssetExplorer\\\\src\\\\App\\\\bin\\\\Release\\\\net8.0-windows\\\\GameAssetExplorer.exe\"; $shortcutPath = \"C:\\\\Users\\\\madie\\\\Desktop\\\\GameAssetExplorer.lnk\"; $wsh = New-Object -ComObject WScript.Shell; $sc = $wsh.CreateShortcut\\($shortcutPath\\); $sc.TargetPath = $exePath; $sc.WorkingDirectory = Split-Path $exePath; $sc.Description = \"Game Asset Explorer\"; $sc.Save\\(\\); Write-Output \"Shortcut created at $shortcutPath\")",
-      "Bash(dir \"C:\\\\\\\\Tools\")"
+      "Bash(dir \"C:\\\\\\\\Tools\")",
+      "Bash(curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/claude-0/-home-user-Animus/44efffa1-c9c0-589f-8cd5-fc1a30126d42/scratchpad/dotnet-install.sh)",
+      "Bash(chmod +x /tmp/claude-0/-home-user-Animus/44efffa1-c9c0-589f-8cd5-fc1a30126d42/scratchpad/dotnet-install.sh)",
+      "Bash(/tmp/claude-0/-home-user-Animus/44efffa1-c9c0-589f-8cd5-fc1a30126d42/scratchpad/dotnet-install.sh --channel 8.0 --install-dir /root/.dotnet)"
     ]
   }
 }

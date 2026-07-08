@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>GameAssetExplorer.ModelExporter</AssemblyName>
@@ -10,8 +10,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\Core\Core.csproj" />
-    <!-- AssimpNet: Handles FBX export with full skeleton, bone, and material slot support -->
+    <!-- AssimpNet: powers the glTF export path (GltfModelExporter). FBX is our own binary writer. -->
     <PackageReference Include="AssimpNet" Version="4.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Expose internal FBX helpers (Mat4, etc.) to the test project for math verification. -->
+    <InternalsVisibleTo Include="GameAssetExplorer.Tests" />
   </ItemGroup>
 
 </Project>
