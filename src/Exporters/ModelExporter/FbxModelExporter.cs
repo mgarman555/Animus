@@ -16,15 +16,19 @@ namespace GameAssetExplorer.Exporters.ModelExporter;
 public class FbxModelExporter : IExporter
 {
     public string ExporterName => "FBX Model Exporter";
-    public IReadOnlyList<AssetType> SupportedTypes => new[] { AssetType.StaticMesh, AssetType.SkeletalMesh };
+    public IReadOnlyList<AssetType> SupportedTypes => new[] { AssetType.StaticMesh, AssetType.SkeletalMesh, AssetType.Skeleton };
     public IReadOnlyList<string> OutputExtensions => new[] { ".fbx" };
 
     public async Task<ExportResult> ExportAsync(
         AssetData assetData, string outputDirectory, ExportSettings settings,
         IProgress<ExportProgress>? progress = null)
     {
+        // Standalone skeleton (armature-only) export.
+        if (assetData is SkeletonAssetData skelAsset)
+            return await ExportSkeletonAsync(skelAsset, outputDirectory, settings);
+
         if (assetData is not MeshAssetData mesh)
-            return Fail(assetData, "FBX exporter only handles MeshAssetData.");
+            return Fail(assetData, "FBX exporter only handles MeshAssetData or SkeletonAssetData.");
         if (mesh.Lods.Count == 0 || mesh.Lods[0].VertexBuffer == null)
             return Fail(assetData, "Mesh has no geometry data.");
 
@@ -54,6 +58,36 @@ public class FbxModelExporter : IExporter
             };
         }
         catch (Exception ex) { return Fail(assetData, ex.Message); }
+    }
+
+    private static async Task<ExportResult> ExportSkeletonAsync(
+        SkeletonAssetData skelAsset, string outputDirectory, ExportSettings settings)
+    {
+        if (skelAsset.Skeleton.Bones.Count == 0)
+            return Fail(skelAsset, "Skeleton has no bones.");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            Directory.CreateDirectory(outputDirectory);
+            var name = FbxName.Sanitize(skelAsset.Info.Name, "skeleton", 0);
+            var fbxPath = Path.Combine(outputDirectory, name + ".fbx");
+
+            await Task.Run(() =>
+            {
+                var nodes = FbxSceneBuilder.BuildSkeletonOnly(skelAsset.Skeleton, settings);
+                using var fs = File.Create(fbxPath);
+                FbxBinaryWriter.Write(fs, nodes);
+            });
+
+            sw.Stop();
+            return new ExportResult
+            {
+                Success = true, OutputPath = fbxPath, SourceAsset = skelAsset.Info,
+                FileSizeBytes = new FileInfo(fbxPath).Length, Duration = sw.Elapsed
+            };
+        }
+        catch (Exception ex) { return Fail(skelAsset, ex.Message); }
     }
 
     public async Task<IReadOnlyList<ExportResult>> ExportBatchAsync(

@@ -101,6 +101,97 @@ public class FbxSceneBuilderTests
     }
 
     [Fact]
+    public void Build_SkinnedMesh_EmitsSkeletonSkinAndPose()
+    {
+        // 2 bones; 3 verts, each bound to a bone (vert 0,1 -> bone 0; vert 2 -> bone 1).
+        var vb = new byte[3 * 12];
+        BitConverter.TryWriteBytes(vb.AsSpan(12, 4), 1f);
+        BitConverter.TryWriteBytes(vb.AsSpan(28, 4), 1f);
+        var ib = new byte[3 * 4];
+        for (int i = 0; i < 3; i++) BitConverter.TryWriteBytes(ib.AsSpan(i * 4, 4), i);
+
+        var mesh = new MeshAssetData
+        {
+            Info = new AssetInfo { Name = "Rigged", Type = AssetType.SkeletalMesh },
+            IsSkeletal = true,
+            MaterialSlots = { new MaterialSlot { MaterialName = "M" } },
+            Skeleton = new SkeletonData
+            {
+                Bones =
+                {
+                    new BoneInfo { Name = "root", ParentIndex = -1, Position = new float[] { 0, 0, 0 }, Rotation = new float[] { 0, 0, 0, 1 }, Scale = new float[] { 1, 1, 1 } },
+                    new BoneInfo { Name = "child", ParentIndex = 0, Position = new float[] { 0, 5, 0 }, Rotation = new float[] { 0, 0, 0, 1 }, Scale = new float[] { 1, 1, 1 } },
+                }
+            },
+            Lods =
+            {
+                new LodData
+                {
+                    LodIndex = 0, VertexCount = 3, TriangleCount = 1,
+                    VertexBuffer = vb, IndexBuffer = ib,
+                    InfluencesPerVertex = 1,
+                    BoneIndices = new ushort[] { 0, 0, 1 },
+                    BoneWeights = new float[] { 1f, 1f, 1f },
+                    Submeshes = { new SubmeshInfo { Name = "s", VertexStart = 0, VertexCount = 3, IndexStart = 0, IndexCount = 3 } }
+                }
+            }
+        };
+
+        var nodes = FbxSceneBuilder.Build(mesh, mesh.Lods[0], new ExportSettings { ExportSkeleton = true });
+        var read = FbxBinaryReader.ReadFromBytes(FbxBinaryWriter.WriteToBytes(nodes));
+        var objects = read.First(n => n.Name == "Objects");
+
+        // Two LimbNode bone models + one armature Null.
+        var models = objects.Children.Where(c => c.Name == "Model").ToList();
+        Assert.Contains(models, m => (string)m.Properties[2] == "Null");
+        Assert.Equal(2, models.Count(m => (string)m.Properties[2] == "LimbNode"));
+
+        // Skin + clusters.
+        var deformers = objects.Children.Where(c => c.Name == "Deformer").ToList();
+        Assert.Contains(deformers, d => (string)d.Properties[2] == "Skin");
+        var clusters = deformers.Where(d => (string)d.Properties[2] == "Cluster").ToList();
+        Assert.Equal(2, clusters.Count); // one per influencing bone
+
+        // Cluster weights present and TransformLink is a 16-element matrix.
+        foreach (var cl in clusters)
+        {
+            var w = Assert.IsType<double[]>(cl.Children.First(c => c.Name == "Weights").Properties[0]);
+            Assert.All(w, x => Assert.Equal(1.0, x, 5));
+            var tl = Assert.IsType<double[]>(cl.Children.First(c => c.Name == "TransformLink").Properties[0]);
+            Assert.Equal(16, tl.Length);
+        }
+
+        // Bind pose lists armature + both bones.
+        var pose = objects.Children.First(c => c.Name == "Pose");
+        Assert.Equal(3, pose.Children.Count(c => c.Name == "PoseNode"));
+
+        // child bone's global bind translation is +5 in Y (composed from the hierarchy).
+        var childCluster = clusters.First(c => ((int[])c.Children.First(k => k.Name == "Indexes").Properties[0]).Contains(2));
+        var childLink = (double[])childCluster.Children.First(k => k.Name == "TransformLink").Properties[0];
+        Assert.Equal(5.0, childLink[13], 4); // column-major translation Y at index 13
+    }
+
+    [Fact]
+    public void BuildSkeletonOnly_EmitsBonesAndPoseNoGeometry()
+    {
+        var skel = new SkeletonData
+        {
+            Bones =
+            {
+                new BoneInfo { Name = "root", ParentIndex = -1, Position = new float[3], Rotation = new float[] { 0, 0, 0, 1 }, Scale = new float[] { 1, 1, 1 } },
+                new BoneInfo { Name = "spine", ParentIndex = 0, Position = new float[] { 0, 1, 0 }, Rotation = new float[] { 0, 0, 0, 1 }, Scale = new float[] { 1, 1, 1 } },
+            }
+        };
+        var nodes = FbxSceneBuilder.BuildSkeletonOnly(skel, new ExportSettings());
+        var read = FbxBinaryReader.ReadFromBytes(FbxBinaryWriter.WriteToBytes(nodes));
+        var objects = read.First(n => n.Name == "Objects");
+
+        Assert.DoesNotContain(objects.Children, c => c.Name == "Geometry");
+        Assert.Equal(2, objects.Children.Count(c => c.Name == "Model" && (string)c.Properties[2] == "LimbNode"));
+        Assert.Contains(objects.Children, c => c.Name == "Pose");
+    }
+
+    [Fact]
     public void Build_DeclaresYUpWhenBoneCorrectionOn_ZUpWhenOff()
     {
         var mesh = TwoSubmeshQuad();

@@ -10,8 +10,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\Core\Core.csproj" />
-    <!-- AssimpNet: Handles FBX export with full skeleton, bone, and material slot support -->
+    <!-- AssimpNet: powers the glTF export path (GltfModelExporter). FBX is our own binary writer. -->
     <PackageReference Include="AssimpNet" Version="4.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Expose internal FBX helpers (Mat4, etc.) to the test project for math verification. -->
+    <InternalsVisibleTo Include="GameAssetExplorer.Tests" />
   </ItemGroup>
 
 </Project>

@@ -24,8 +24,15 @@ public static class FbxSceneBuilder
     public static List<FbxNode> Build(MeshAssetData mesh, LodData lod, ExportSettings settings)
     {
         var ids = new IdGen();
-        bool convert = settings.ApplyBlenderBoneCorrection;
         float scale = settings.ModelScaleFactor <= 0 ? 1f : settings.ModelScaleFactor;
+
+        // Skinned meshes are exported UE-native (Z-up, no vertex bake) so bones and vertices share
+        // one space; the importer applies its own axis conversion from GlobalSettings. The
+        // ApplyBlenderBoneCorrection vertex-bake is therefore honoured only for unrigged meshes.
+        bool skinned = settings.ExportSkeleton
+                       && mesh.Skeleton != null && mesh.Skeleton.Bones.Count > 0
+                       && lod.BoneIndices != null && lod.BoneWeights != null;
+        bool bake = settings.ApplyBlenderBoneCorrection && !skinned;
 
         var objects = new FbxNode("Objects");
         var connections = new FbxNode("Connections");
@@ -38,33 +45,70 @@ public static class FbxSceneBuilder
                           IndexStart = 0, IndexCount = (lod.IndexBuffer?.Length ?? 0) / 4 }
               };
 
-        int geomCount = 0, modelCount = 0, matCount = 0;
+        // Skeleton (shared across submeshes) built once so every cluster references the same bones.
+        Skeleton? skel = skinned ? BuildSkeleton(mesh.Skeleton!, ids, objects, connections) : null;
+
+        int geomCount = 0, modelCount = 1 /*armature Null when skinned*/, matCount = 0;
+        if (!skinned) modelCount = 0;
+        int boneModels = skel?.BoneIds.Length ?? 0;
+        int deformerCount = 0, subDeformerCount = 0, poseCount = skinned ? 1 : 0, attrCount = boneModels;
         int ni = (lod.IndexBuffer?.Length ?? 0) / 4;
 
         for (int s = 0; s < submeshes.Count; s++)
         {
-            var built = BuildSubmesh(mesh, lod, submeshes[s], s, ni, convert, scale, ids, objects, connections);
-            if (built) { geomCount++; modelCount++; matCount++; }
+            long geomId = BuildSubmesh(mesh, lod, submeshes[s], s, ni, bake, scale, ids, objects, connections);
+            if (geomId == 0) continue;
+            geomCount++; modelCount++; matCount++;
+
+            if (skel != null)
+            {
+                int subs = BuildSkin(lod, submeshes[s], geomId, skel, ids, objects, connections);
+                if (subs > 0) { deformerCount++; subDeformerCount += subs; }
+            }
         }
 
         var top = new List<FbxNode>
         {
             BuildHeader(),
-            BuildGlobalSettings(convert),
-            BuildDefinitions(geomCount, modelCount, matCount),
+            BuildGlobalSettings(bake),
+            BuildDefinitions(geomCount, modelCount, matCount, boneModels, deformerCount, subDeformerCount, poseCount, attrCount),
             objects,
             connections,
         };
         return top;
     }
 
-    private static bool BuildSubmesh(
+    /// <summary>
+    /// Builds an FBX document for a standalone skeleton (armature only, no geometry). This is the
+    /// "skeleton exporter" — same bone nodes + bind pose the skinned path emits, minus meshes.
+    /// </summary>
+    public static List<FbxNode> BuildSkeletonOnly(SkeletonData skeleton, ExportSettings settings)
+    {
+        var ids = new IdGen();
+        var objects = new FbxNode("Objects");
+        var connections = new FbxNode("Connections");
+
+        var skel = BuildSkeleton(skeleton, ids, objects, connections);
+
+        var top = new List<FbxNode>
+        {
+            BuildHeader(),
+            BuildGlobalSettings(false), // native Z-up; importer converts
+            BuildDefinitions(0, 1 /*armature Null*/, 0, skel.BoneIds.Length, 0, 0, 1, skel.BoneIds.Length),
+            objects,
+            connections,
+        };
+        return top;
+    }
+
+    /// <summary>Emits Geometry+Model+Material for one submesh. Returns the geometry object id, or 0 if skipped.</summary>
+    private static long BuildSubmesh(
         MeshAssetData mesh, LodData lod, SubmeshInfo sub, int s, int ni,
         bool convert, float scale, IdGen ids, FbxNode objects, FbxNode connections)
     {
         int vc = sub.VertexCount;
         if (vc <= 0 || sub.IndexCount <= 0 || lod.VertexBuffer == null || lod.IndexBuffer == null)
-            return false;
+            return 0;
         var vb = lod.VertexBuffer;
         var ib = lod.IndexBuffer;
 
@@ -95,7 +139,7 @@ public static class FbxSceneBuilder
             polyIndex.Add(a); polyIndex.Add(b); polyIndex.Add(~c); // ~c marks polygon end
             faceTris.Add((a, b, c));
         }
-        if (polyIndex.Count == 0) return false;
+        if (polyIndex.Count == 0) return 0;
 
         // Normals: prefer source channel, else accumulate from faces.
         var normals = ExtractOrComputeNormals(lod, sub, vc, convert, pos, faceTris);
@@ -126,7 +170,143 @@ public static class FbxSceneBuilder
         connections.Add("C", "OO", modelId, 0L);      // model → scene root
         connections.Add("C", "OO", geomId, modelId);  // geometry → model
         connections.Add("C", "OO", matId, modelId);   // material → model
-        return true;
+        return geomId;
+    }
+
+    // ─── skeleton + skinning ──────────────────────────────────────────────────────
+
+    /// <summary>Resolved skeleton: per-bone object ids + global bind matrices, in bone-list order.</summary>
+    private sealed class Skeleton
+    {
+        public long[] BoneIds = Array.Empty<long>();
+        public Mat4[] GlobalBind = Array.Empty<Mat4>();
+        public IReadOnlyList<BoneInfo> Bones = Array.Empty<BoneInfo>();
+    }
+
+    /// <summary>
+    /// Emits the armature Null, one LimbNode Model + NodeAttribute per bone, the bone hierarchy
+    /// connections, and a BindPose. Returns per-bone ids and global bind matrices for the clusters.
+    /// </summary>
+    private static Skeleton BuildSkeleton(SkeletonData skeleton, IdGen ids, FbxNode objects, FbxNode connections)
+    {
+        var bones = skeleton.Bones;
+        int n = bones.Count;
+        var boneIds = new long[n];
+        var attrIds = new long[n];
+        var global = new Mat4[n];
+
+        long armatureId = ids.Next();
+        var armature = new FbxNode("Model", armatureId, "Model::Armature", "Null");
+        armature.Add("Version", 232);
+        armature.Add("Properties70");
+        objects.Add(armature);
+        connections.Add("C", "OO", armatureId, 0L); // armature → scene root
+
+        for (int i = 0; i < n; i++)
+        {
+            boneIds[i] = ids.Next();
+            attrIds[i] = ids.Next();
+
+            var b = bones[i];
+            var local = Mat4.LocalFromBone(b);
+            global[i] = b.ParentIndex >= 0 && b.ParentIndex < i ? global[b.ParentIndex] * local : local;
+
+            var (rx, ry, rz) = Mat4.QuatToEulerXyzDeg(b.Rotation[0], b.Rotation[1], b.Rotation[2], b.Rotation[3]);
+            double sx = b.Scale[0] == 0 ? 1 : b.Scale[0];
+            double sy = b.Scale[1] == 0 ? 1 : b.Scale[1];
+            double sz = b.Scale[2] == 0 ? 1 : b.Scale[2];
+
+            var model = new FbxNode("Model", boneIds[i], $"Model::{FbxName.Sanitize(b.Name, "bone", i)}", "LimbNode");
+            model.Add("Version", 232);
+            var p70 = model.Add("Properties70");
+            p70.Add(P("Lcl Translation", "Lcl Translation", "", "A", (double)b.Position[0], (double)b.Position[1], (double)b.Position[2]));
+            p70.Add(P("Lcl Rotation", "Lcl Rotation", "", "A", rx, ry, rz));
+            p70.Add(P("Lcl Scaling", "Lcl Scaling", "", "A", sx, sy, sz));
+            objects.Add(model);
+
+            var attr = new FbxNode("NodeAttribute", attrIds[i], "NodeAttribute::", "LimbNode");
+            attr.Add("TypeFlags", "Skeleton");
+            objects.Add(attr);
+
+            connections.Add("C", "OO", attrIds[i], boneIds[i]); // attribute → bone model
+            long parentId = b.ParentIndex >= 0 && b.ParentIndex < n ? boneIds[b.ParentIndex] : armatureId;
+            connections.Add("C", "OO", boneIds[i], parentId);   // bone → parent bone (or armature)
+        }
+
+        // BindPose: global bind matrix per bone (+ armature at identity).
+        var pose = new FbxNode("Pose", ids.Next(), "Pose::BIND_POSES", "BindPose");
+        pose.Add("Type", "BindPose");
+        pose.Add("Version", 100);
+        pose.Add("NbPoseNodes", n + 1);
+        AddPoseNode(pose, armatureId, Mat4.Identity());
+        for (int i = 0; i < n; i++) AddPoseNode(pose, boneIds[i], global[i]);
+        objects.Add(pose);
+
+        return new Skeleton { BoneIds = boneIds, GlobalBind = global, Bones = bones };
+    }
+
+    private static void AddPoseNode(FbxNode pose, long nodeId, Mat4 m)
+    {
+        var pn = pose.Add("PoseNode");
+        pn.Add("Node", nodeId);
+        pn.Add("Matrix").Prop(m.M);
+    }
+
+    /// <summary>
+    /// Builds a Skin deformer on one submesh's geometry plus a Cluster per influencing bone,
+    /// mapping submesh-local vertex indices to bones via the LOD's parallel skin arrays.
+    /// Returns the number of clusters emitted (0 if the submesh has no weighted vertices).
+    /// </summary>
+    private static int BuildSkin(LodData lod, SubmeshInfo sub, long geomId, Skeleton skel, IdGen ids, FbxNode objects, FbxNode connections)
+    {
+        if (lod.BoneIndices == null || lod.BoneWeights == null) return 0;
+        int inf = Math.Max(lod.InfluencesPerVertex, 1);
+
+        // bone → (local vertex indices, weights)
+        var byBone = new Dictionary<int, (List<int> idx, List<double> wt)>();
+        for (int v = 0; v < sub.VertexCount; v++)
+        {
+            int gv = sub.VertexStart + v;
+            for (int k = 0; k < inf; k++)
+            {
+                int si = gv * inf + k;
+                if (si >= lod.BoneWeights.Length) break;
+                double w = lod.BoneWeights[si];
+                if (w <= 0) continue;
+                int bone = lod.BoneIndices[si];
+                if (bone < 0 || bone >= skel.BoneIds.Length) continue;
+                if (!byBone.TryGetValue(bone, out var lst)) { lst = (new List<int>(), new List<double>()); byBone[bone] = lst; }
+                lst.idx.Add(v);
+                lst.wt.Add(w);
+            }
+        }
+        if (byBone.Count == 0) return 0;
+
+        long skinId = ids.Next();
+        var skin = new FbxNode("Deformer", skinId, "Deformer::Skin", "Skin");
+        skin.Add("Version", 101);
+        objects.Add(skin);
+        connections.Add("C", "OO", skinId, geomId); // skin → geometry
+
+        int clusters = 0;
+        foreach (var (bone, data) in byBone)
+        {
+            long clusterId = ids.Next();
+            var cl = new FbxNode("Deformer", clusterId, "SubDeformer::Cluster", "Cluster");
+            cl.Add("Version", 100);
+            cl.Add("Indexes").Prop(data.idx.ToArray());
+            cl.Add("Weights").Prop(data.wt.ToArray());
+            // Transform = mesh global at bind (identity — mesh model carries no Lcl transform).
+            cl.Add("Transform").Prop(Mat4.Identity().M);
+            // TransformLink = bone global bind matrix.
+            cl.Add("TransformLink").Prop(skel.GlobalBind[bone].M);
+            objects.Add(cl);
+
+            connections.Add("C", "OO", clusterId, skinId);            // cluster → skin
+            connections.Add("C", "OO", skel.BoneIds[bone], clusterId); // bone model → cluster
+            clusters++;
+        }
+        return clusters;
     }
 
     private static double[] ExtractOrComputeNormals(
@@ -270,15 +450,22 @@ public static class FbxSceneBuilder
         return gs;
     }
 
-    private static FbxNode BuildDefinitions(int geom, int model, int mat)
+    private static FbxNode BuildDefinitions(
+        int geom, int model, int mat, int boneModels = 0,
+        int deformers = 0, int subDeformers = 0, int poses = 0, int nodeAttrs = 0)
     {
+        int totalModels = model + boneModels;
         var d = new FbxNode("Definitions");
         d.Add("Version", 100);
-        d.Add("Count", 1 + geom + model + mat);
+        d.Add("Count", 1 + geom + totalModels + mat + deformers + subDeformers + poses + nodeAttrs);
         d.Add("ObjectType", "GlobalSettings").Add("Count", 1);
-        if (geom > 0)  d.Add("ObjectType", "Geometry").Add("Count", geom);
-        if (model > 0) d.Add("ObjectType", "Model").Add("Count", model);
-        if (mat > 0)   d.Add("ObjectType", "Material").Add("Count", mat);
+        if (geom > 0)          d.Add("ObjectType", "Geometry").Add("Count", geom);
+        if (totalModels > 0)   d.Add("ObjectType", "Model").Add("Count", totalModels);
+        if (nodeAttrs > 0)     d.Add("ObjectType", "NodeAttribute").Add("Count", nodeAttrs);
+        if (mat > 0)           d.Add("ObjectType", "Material").Add("Count", mat);
+        if (deformers + subDeformers > 0)
+                               d.Add("ObjectType", "Deformer").Add("Count", deformers + subDeformers);
+        if (poses > 0)         d.Add("ObjectType", "Pose").Add("Count", poses);
         return d;
     }
 
