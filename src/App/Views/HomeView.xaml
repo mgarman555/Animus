@@ -7,49 +7,54 @@
 
     <Grid>
         <Grid.RowDefinitions>
-            <!-- Toolbar -->
-            <RowDefinition Height="52"/>
+            <!-- Large-title header -->
+            <RowDefinition Height="Auto"/>
             <!-- Library content -->
             <RowDefinition Height="*"/>
             <!-- Status strip -->
-            <RowDefinition Height="28"/>
+            <RowDefinition Height="26"/>
         </Grid.RowDefinitions>
 
-        <!-- ── Toolbar ───────────────────────────────────────────────────── -->
-        <Border Grid.Row="0"
-                Background="{StaticResource Surface}"
-                BorderBrush="{StaticResource Border}"
-                BorderThickness="0,0,0,1">
-            <Grid Margin="16,0">
+        <!-- ── Header (macOS large title) ────────────────────────────────── -->
+        <Border Grid.Row="0" Background="{StaticResource Bg}">
+            <Grid Margin="28,22,24,14">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Title -->
-                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                <!-- Title block -->
+                <StackPanel Grid.Column="0" VerticalAlignment="Center">
                     <TextBlock Text="Library"
-                               FontSize="18" FontWeight="SemiBold"
-                               Foreground="{StaticResource Text}"
-                               VerticalAlignment="Center"/>
-                    <TextBlock Text="{Binding Games.Count, StringFormat=' ({0} games)'}"
+                               FontFamily="{StaticResource UiDisplayFont}"
+                               FontSize="30" FontWeight="Bold"
+                               Foreground="{StaticResource Text}"/>
+                    <TextBlock Margin="0,2,0,0"
                                FontSize="13"
-                               Foreground="{StaticResource TextSub}"
-                               VerticalAlignment="Center"
-                               Margin="4,0,0,0"/>
+                               Foreground="{StaticResource TextSub}">
+                        <Run Text="{Binding Games.Count, Mode=OneWay}"/><Run Text=" games in your collection"/>
+                    </TextBlock>
                 </StackPanel>
 
-                <!-- Toolbar buttons -->
+                <!-- Actions -->
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Content="📄  Logs"
+                    <Button Content="Logs"
                             Style="{StaticResource GhostBtn}"
-                            Padding="10,5"
-                            Margin="0,0,8,0"
+                            Padding="12,7"
+                            Margin="0,0,10,0"
                             ToolTip="Open the log folder for sharing diagnostics"
                             Click="OnOpenLogsClick"/>
-                    <Button Content="＋  Load Game"
-                            Style="{StaticResource PrimaryBtn}"
-                            Command="{Binding AddGameCommand}"/>
+                    <Button Style="{StaticResource PrimaryBtn}"
+                            Command="{Binding AddGameCommand}"
+                            ToolTip="Add a game to your library">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="＋" FontSize="15" FontWeight="Bold"
+                                       VerticalAlignment="Center" Margin="0,0,7,0"
+                                       Foreground="White"/>
+                            <TextBlock Text="Add Game" VerticalAlignment="Center"
+                                       Foreground="White" FontWeight="SemiBold"/>
+                        </StackPanel>
+                    </Button>
                 </StackPanel>
             </Grid>
         </Border>
@@ -57,12 +62,13 @@
         <!-- ── Game Library Grid ─────────────────────────────────────────── -->
         <ScrollViewer Grid.Row="1"
                       VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled">
+                      HorizontalScrollBarVisibility="Disabled"
+                      Padding="0,0,0,8">
             <Grid>
                 <!-- Empty state -->
                 <StackPanel HorizontalAlignment="Center"
                             VerticalAlignment="Center"
-                            Margin="0,80,0,0">
+                            Margin="0,120,0,0">
                     <StackPanel.Style>
                         <Style TargetType="StackPanel">
                             <Setter Property="Visibility" Value="Collapsed"/>
@@ -73,21 +79,34 @@
                             </Style.Triggers>
                         </Style>
                     </StackPanel.Style>
-                    <TextBlock Text="No games configured yet"
-                               FontSize="20" FontWeight="Light"
-                               Foreground="{StaticResource TextSub}"
-                               HorizontalAlignment="Center"/>
-                    <TextBlock Text="Click  ＋ Load Game  to get started."
-                               FontSize="13"
-                               Foreground="{StaticResource TextMuted}"
+                    <!-- Soft icon disc -->
+                    <Border Width="84" Height="84" CornerRadius="20"
+                            Background="{StaticResource Surface}"
+                            HorizontalAlignment="Center">
+                        <TextBlock Text="🎮" FontSize="40"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <TextBlock Text="Your library is empty"
+                               FontFamily="{StaticResource UiDisplayFont}"
+                               FontSize="19" FontWeight="SemiBold"
+                               Foreground="{StaticResource Text}"
                                HorizontalAlignment="Center"
-                               Margin="0,8,0,0"/>
+                               Margin="0,18,0,0"/>
+                    <TextBlock Text="Add a game to start browsing and exporting its assets."
+                               FontSize="13"
+                               Foreground="{StaticResource TextSub}"
+                               HorizontalAlignment="Center"
+                               Margin="0,6,0,18"/>
+                    <Button Style="{StaticResource PrimaryBtn}"
+                            Command="{Binding AddGameCommand}"
+                            HorizontalAlignment="Center"
+                            Content="Add Your First Game"/>
                 </StackPanel>
 
                 <!-- Game card grid -->
                 <ItemsControl x:Name="GameCardsControl"
                               ItemsSource="{Binding Games}"
-                              Margin="16">
+                              Margin="18,4,18,18">
                     <ItemsControl.ItemsPanel>
                         <ItemsPanelTemplate>
                             <WrapPanel Orientation="Horizontal"/>
@@ -97,16 +116,22 @@
                         <DataTemplate DataType="{x:Type vm:GameLibraryEntry}">
                             <!-- Game Card -->
                             <Border x:Name="Card"
-                                    Width="180" Height="260"
-                                    Margin="8"
-                                    CornerRadius="6"
+                                    Width="200" Height="286"
+                                    Margin="10"
+                                    CornerRadius="14"
                                     Background="{StaticResource Surface}"
-                                    BorderThickness="1"
+                                    BorderThickness="2"
+                                    BorderBrush="Transparent"
                                     Cursor="Hand"
-                                    Tag="{Binding}">
-                                <Border.BorderBrush>
-                                    <SolidColorBrush x:Name="CardBorder" Color="#3F3F46"/>
-                                </Border.BorderBrush>
+                                    Tag="{Binding}"
+                                    RenderTransformOrigin="0.5,0.5">
+                                <Border.RenderTransform>
+                                    <TranslateTransform Y="0"/>
+                                </Border.RenderTransform>
+                                <Border.Effect>
+                                    <DropShadowEffect BlurRadius="16" ShadowDepth="4" Direction="270"
+                                                      Color="Black" Opacity="0.35"/>
+                                </Border.Effect>
 
                                 <!-- Right-click context menu -->
                                 <Border.ContextMenu>
@@ -132,30 +157,12 @@
 
                                 <Grid>
                                     <Grid.RowDefinitions>
-                                        <RowDefinition Height="195"/>
+                                        <RowDefinition Height="204"/>
                                         <RowDefinition Height="*"/>
                                     </Grid.RowDefinitions>
 
-                                    <!-- ⋮ menu button (top-right corner of card) -->
-                                    <Button Grid.Row="0"
-                                            Content="⋮"
-                                            FontSize="18"
-                                            FontWeight="Bold"
-                                            Width="28" Height="28"
-                                            HorizontalAlignment="Right"
-                                            VerticalAlignment="Top"
-                                            Margin="0,4,4,0"
-                                            Panel.ZIndex="2"
-                                            Foreground="White"
-                                            Background="#80000000"
-                                            BorderThickness="0"
-                                            Padding="0,-4,0,0"
-                                            Cursor="Hand"
-                                            ToolTip="Edit / Remove"
-                                            Click="OnCardMenuButtonClick"/>
-
                                     <!-- Cover area -->
-                                    <Border Grid.Row="0" CornerRadius="6,6,0,0" ClipToBounds="True">
+                                    <Border Grid.Row="0" CornerRadius="12,12,0,0" ClipToBounds="True">
                                         <Grid>
                                             <!-- Gradient placeholder -->
                                             <Border x:Name="GradientPlaceholder">
@@ -173,13 +180,14 @@
                                                 </Border.Style>
                                                 <Border.Background>
                                                     <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                                        <GradientStop Color="#0e3a6e" Offset="0"/>
-                                                        <GradientStop Color="#061e40" Offset="1"/>
+                                                        <GradientStop Color="#3A3A3C" Offset="0"/>
+                                                        <GradientStop Color="#232325" Offset="1"/>
                                                     </LinearGradientBrush>
                                                 </Border.Background>
                                                 <TextBlock Text="{Binding DisplayName[0]}"
-                                                           FontSize="72" FontWeight="Bold"
-                                                           Foreground="White" Opacity="0.08"
+                                                           FontFamily="{StaticResource UiDisplayFont}"
+                                                           FontSize="80" FontWeight="Bold"
+                                                           Foreground="White" Opacity="0.10"
                                                            HorizontalAlignment="Center"
                                                            VerticalAlignment="Center"/>
                                             </Border>
@@ -201,26 +209,74 @@
                                                     </Style>
                                                 </Image.Style>
                                             </Image>
+
+                                            <!-- ⋯ menu button (appears on hover) -->
+                                            <Button x:Name="MenuBtn"
+                                                    Content="⋯"
+                                                    FontSize="16" FontWeight="Bold"
+                                                    Width="30" Height="30"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Top"
+                                                    Margin="0,8,8,0"
+                                                    Panel.ZIndex="2"
+                                                    Opacity="0"
+                                                    Foreground="White"
+                                                    Cursor="Hand"
+                                                    ToolTip="Edit / Remove"
+                                                    Click="OnCardMenuButtonClick">
+                                                <Button.Template>
+                                                    <ControlTemplate TargetType="Button">
+                                                        <Border x:Name="mb"
+                                                                Background="#99000000"
+                                                                CornerRadius="15">
+                                                            <ContentPresenter HorizontalAlignment="Center"
+                                                                              VerticalAlignment="Center"
+                                                                              Margin="0,-4,0,0"/>
+                                                        </Border>
+                                                        <ControlTemplate.Triggers>
+                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                <Setter TargetName="mb" Property="Background" Value="#CC000000"/>
+                                                            </Trigger>
+                                                        </ControlTemplate.Triggers>
+                                                    </ControlTemplate>
+                                                </Button.Template>
+                                            </Button>
                                         </Grid>
                                     </Border>
 
                                     <!-- Info area -->
-                                    <StackPanel Grid.Row="1" Margin="10,8,10,10" VerticalAlignment="Center">
-                                        <!-- Game name -->
+                                    <StackPanel Grid.Row="1" Margin="14,0,14,0" VerticalAlignment="Center">
                                         <TextBlock Text="{Binding DisplayName}"
-                                                   FontSize="12" FontWeight="SemiBold"
+                                                   FontSize="14" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource Text}"
                                                    TextTrimming="CharacterEllipsis"/>
-                                        <!-- Engine / version subtitle -->
                                         <TextBlock Text="{Binding SubtitleDisplay}"
-                                                   FontSize="10"
+                                                   FontSize="11"
                                                    Foreground="{StaticResource TextSub}"
-                                                   Margin="0,2,0,0"/>
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Margin="0,3,0,0"/>
                                     </StackPanel>
                                 </Grid>
                             </Border>
 
-                            <!-- Card selected trigger -->
+                            <!-- Card interaction triggers -->
                             <DataTemplate.Triggers>
+                                <!-- Hover: lift + reveal menu + deepen shadow -->
+                                <Trigger SourceName="Card" Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="MenuBtn" Property="Opacity" Value="1"/>
+                                    <Setter TargetName="Card" Property="RenderTransform">
+                                        <Setter.Value>
+                                            <TranslateTransform Y="-4"/>
+                                        </Setter.Value>
+                                    </Setter>
+                                    <Setter TargetName="Card" Property="Effect">
+                                        <Setter.Value>
+                                            <DropShadowEffect BlurRadius="30" ShadowDepth="10" Direction="270"
+                                                              Color="Black" Opacity="0.5"/>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Trigger>
+                                <!-- Selected: accent ring -->
                                 <DataTrigger Binding="{Binding IsSelected}" Value="True">
                                     <Setter TargetName="Card" Property="BorderBrush" Value="{StaticResource Accent}"/>
                                 </DataTrigger>
@@ -233,10 +289,10 @@
 
         <!-- ── Status Strip ──────────────────────────────────────────────── -->
         <Border Grid.Row="2"
-                Background="{StaticResource Panel}"
+                Background="{StaticResource PanelDark}"
                 BorderBrush="{StaticResource Border}"
                 BorderThickness="0,1,0,0">
-            <Grid Margin="12,0">
+            <Grid Margin="16,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
