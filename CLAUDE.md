@@ -88,6 +88,14 @@ src/
 - NaughtyDog per-submesh textures: plugin resolves each submesh's diffuse to full-res via `texturedict3`;
   `SkeletalMeshViewerWindow` decodes + paints each submesh its own `ImageBrush` (PNG-verified; GUI eyeball pending)
 - Mesh-level diffuse: VRAM_DESC scan + full-res `texturedict3` hash lookup + BCnEncoder decode + ImageBrush
+- Character export from the 3D viewer (`SkeletalMeshViewerWindow`): four buttons — Geometry / Textures /
+  Armature / Export All — driven by `App/Services/CharacterExporter.cs`. Exports the **currently-selected LOD**
+  into a normalized `{chosen}/{Character}/` folder: model (glTF/OBJ/FBX per `ExportSettings`), `Textures/*.png`
+  (re-encoded from the viewport-decoded bitmaps so they match on-screen exactly), a skeleton JSON sidecar, and a
+  `_meta.json`. "Geometry" omits the skeleton; "Export All" embeds it. `GltfModelExporter` now honours
+  `ExportSettings.ExportSkeleton`. Armature button is disabled when a mesh has no parsed skeleton (all TLOU2
+  Ellie character/clothing paks — `JOINT_HIERARCHY` is detected by `NdPakReader` but not yet parsed into
+  `SkeletonData`, so armature export is a no-op there until ND skeleton parsing lands).
 
 ### In Progress
 - **Multi-game UI shell + Codex/FModel hybrid** — see `design/ui-mockup.html`. `AssetBrowserView` is single-game;
@@ -96,6 +104,9 @@ src/
   decode in the viewer forces skip-untile for that reason)
 
 ### Planned
+- **ND skeleton parsing** — parse `JOINT_HIERARCHY` records into `SkeletonData` so the viewer's Armature
+  export produces real bones for TLOU2 (base-skeleton paks; Ellie character paks carry no embedded joints and
+  need a sibling base-skeleton pak loaded alongside)
 - FBX model export (CUE4Parse-Conversion)
 - Audio playback with waveform (NAudio)
 - Animation viewer with timeline scrubber

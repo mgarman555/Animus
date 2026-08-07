@@ -1,5 +1,6 @@
 using BCnEncoder.Decoder;
 using BCnEncoder.Shared;
+using GameAssetExplorer.App.Services;
 using GameAssetExplorer.Core.Models;
 using System.IO;
 using System.Windows;
@@ -185,6 +186,13 @@ public partial class SkeletalMeshViewerWindow : Window
                 : null;
             ChkArmature.IsEnabled = (_meshData?.Skeleton?.Bones?.Count ?? 0) > 0;
             ChkArmature.IsChecked = false;
+
+            // Export buttons: geometry always available once a LOD loads; textures/armature only
+            // when there's something to write, so the buttons don't lie about what they'll produce.
+            BtnExportGeometry.IsEnabled = true;
+            BtnExportTextures.IsEnabled = hasAnyTexture;
+            BtnExportArmature.IsEnabled = CharacterExporter.HasArmature(_meshData!);
+            BtnExportAll.IsEnabled      = true;
 
             BuildSubmeshList();
             UpdateMeshVisual();
@@ -900,6 +908,13 @@ public partial class SkeletalMeshViewerWindow : Window
             ChkArmature.IsEnabled = false;
             ChkArmature.IsChecked = false;
 
+            // OBJ preview has no AssetData/skeleton/textures behind it — the character export
+            // pipeline needs the decoded MeshAssetData, so disable the export buttons here.
+            BtnExportGeometry.IsEnabled = false;
+            BtnExportTextures.IsEnabled = false;
+            BtnExportArmature.IsEnabled = false;
+            BtnExportAll.IsEnabled      = false;
+
             BuildSubmeshList();
             UpdateMeshVisual();
             UpdateArmatureVisual();
@@ -1210,5 +1225,122 @@ public partial class SkeletalMeshViewerWindow : Window
                 System.Windows.MessageBox.Show("Could not parse the selected .obj file.",
                     "Load Error", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+    }
+
+    // ── Export (Geometry / Textures / Armature / All) ─────────────────────────
+
+    private string _lastExportDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+        "GameAssetExplorer_Exports");
+
+    private void OnExportGeometry(object sender, RoutedEventArgs e) => RunExport(CharacterExportParts.Geometry);
+    private void OnExportTextures(object sender, RoutedEventArgs e) => RunExport(CharacterExportParts.Textures);
+    private void OnExportArmature(object sender, RoutedEventArgs e) => RunExport(CharacterExportParts.Armature);
+    private void OnExportAll(object sender, RoutedEventArgs e)       => RunExport(CharacterExportParts.All);
+
+    private async void RunExport(CharacterExportParts parts)
+    {
+        if (_meshData == null || _meshData.Lods.Count == 0)
+        {
+            SetExportStatus("Nothing loaded to export.");
+            return;
+        }
+
+        using var dlg = new System.Windows.Forms.FolderBrowserDialog
+        {
+            Description  = "Select the folder to export this character into",
+            SelectedPath = _lastExportDir
+        };
+        if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+        _lastExportDir = dlg.SelectedPath;
+
+        int lodIndex = LodCombo.SelectedIndex >= 0 ? LodCombo.SelectedIndex : 0;
+
+        // Reuse the settings the viewer already carries; format follows ExportSettings.ModelFormat
+        // (glTF by default — Blender/UE native). Texture PNGs come from the viewport-decoded
+        // bitmaps so they match what's on screen exactly.
+        var request = new CharacterExportRequest
+        {
+            Mesh        = _meshData,
+            Info        = _info,
+            LodIndex    = lodIndex,
+            OutputRoot  = dlg.SelectedPath,
+            Settings    = new ExportSettings(),
+            Textures    = parts.HasFlag(CharacterExportParts.Textures)
+                              ? CollectExportTextures()
+                              : Array.Empty<ExportTexture>(),
+        };
+
+        SetExportBusy(true);
+        SetExportStatus("Exporting…");
+        try
+        {
+            var result = await new CharacterExporter().ExportAsync(request, parts);
+            SetExportStatus(result.Warnings.Count > 0
+                ? $"{result.Summary}\n{string.Join("\n", result.Warnings)}"
+                : result.Summary);
+
+            if (result.Success)
+            {
+                try { System.Diagnostics.Process.Start("explorer.exe", $"\"{result.OutputDirectory}\""); }
+                catch { /* explorer not available (non-Windows dev) — status text still shows the path */ }
+            }
+        }
+        catch (Exception ex)
+        {
+            SetExportStatus($"Export failed: {ex.Message}");
+        }
+        finally
+        {
+            SetExportBusy(false);
+        }
+    }
+
+    /// <summary>
+    /// Pull one PNG-ready bitmap per distinct texture currently painted in the viewport. Prefers
+    /// each submesh's own diffuse (a body = tank top + pants + shoes → three PNGs), deduped by the
+    /// submesh's texPath so shared maps aren't written twice. Falls back to the mesh-level diffuse.
+    /// </summary>
+    private List<ExportTexture> CollectExportTextures()
+    {
+        var textures = new List<ExportTexture>();
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        for (int i = 0; i < _submeshBrushes.Count; i++)
+        {
+            if (_submeshBrushes[i]?.ImageSource is not BitmapSource bmp) continue;
+
+            var sm = i < _submeshInfos.Count ? _submeshInfos[i] : null;
+            string? path = sm?.DiffuseTexturePath;
+            if (!string.IsNullOrEmpty(path) && !seenPaths.Add(path)) continue; // already written
+
+            string label = !string.IsNullOrWhiteSpace(sm?.MaterialName) ? sm!.MaterialName
+                         : i < _submeshNames.Count ? _submeshNames[i]
+                         : $"submesh_{i}";
+            textures.Add(new ExportTexture(label + "_D", bmp));
+        }
+
+        // Mesh-level diffuse fallback (only if no per-submesh maps were collected)
+        if (textures.Count == 0 && _textureBrush?.ImageSource is BitmapSource meshBmp)
+            textures.Add(new ExportTexture(_info.Name + "_D", meshBmp));
+
+        return textures;
+    }
+
+    private void SetExportStatus(string message)
+    {
+        ExportStatusText.Text = message;
+        ExportStatusText.Visibility = string.IsNullOrEmpty(message)
+            ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void SetExportBusy(bool busy)
+    {
+        bool hasTexture  = _submeshBrushes.Any(b => b != null) || _textureBrush != null;
+        bool hasArmature = _meshData != null && CharacterExporter.HasArmature(_meshData);
+        BtnExportGeometry.IsEnabled = !busy;
+        BtnExportTextures.IsEnabled = !busy && hasTexture;
+        BtnExportArmature.IsEnabled = !busy && hasArmature;
+        BtnExportAll.IsEnabled      = !busy;
     }
 }
