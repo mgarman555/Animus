@@ -96,14 +96,18 @@ src/
   `ExportSettings.ExportSkeleton`. Armature button is disabled when a mesh has no parsed skeleton (all TLOU2
   Ellie character/clothing paks — `JOINT_HIERARCHY` is detected by `NdPakReader` but not yet parsed into
   `SkeletonData` for the Ellie paks specifically — see next bullet).
-- NaughtyDog skeleton (`NdJointHierarchyParser`): parses `JOINT_HIERARCHY` into `SkeletonData` by
-  **structure discovery** (find the name-pointer array → ASCII, the int32 parent tree, and the 4×4
-  bind-transform array by signature; accept only if names are joint-like AND parents form a valid
-  acyclic tree). Populates `mesh.Skeleton` in `NaughtyDogPlugin.LoadAssetAsync`, which auto-enables
-  the viewer's Armature toggle + export. **Unverified against a real `joint=True` pak** (Ellie paks
-  are joint-less; base-skeleton paks carry the joints) — names+parents are high-confidence; the
-  bind-pose translation layout (row-major vs inverse-bind) needs a Windows eyeball. Rich `NdJoint[…]`
-  Log output is the diagnostic; a failed/ambiguous parse returns null (no bogus skeleton).
+- NaughtyDog skeleton (`NdJointHierarchyParser`): parses `JOINT_HIERARCHY` into `SkeletonData`, ported
+  from alphaZomega's `fmt_nd_pak.py` + `nd_pak.bt` (github.com/alphazolam). `_JOINT_HIERARCHY` header
+  from the resource base: `nodeCount@+20`, `matsOffset@+32` (→transforms), `namesOffset@+56`. Names =
+  nodeCount × 16B `{u64 hash, u64 ptr→ASCII}`; transforms = 48B `{scale[4], quat[4] xyzw, pos[4]}` with
+  **local** translation; parents = 16B `boneParentInfo {groupID, parentID, childID, chainID}` (parentID
+  @+4). The two sub-offsets the refs leave fuzzy (transform-array start inside the mats block; parent
+  array location) are found by signature — unit-length quaternions, and a valid 16B-stride parent tree.
+  Accepted only if names are joint-like ASCII AND parents form a valid acyclic tree of length nodeCount
+  (else null — no bogus skeleton). Populates `mesh.Skeleton` in `NaughtyDogPlugin.LoadAssetAsync`, which
+  auto-enables the viewer's Armature toggle + export. **Not yet run against a real `joint=True` pak**
+  (Ellie character paks are joint-less; joints live in sibling `-base.pak` files) — verify on Windows via
+  the `NdJoint[…]` log.
 
 ### In Progress
 - **Multi-game UI shell + Codex/FModel hybrid** — see `design/ui-mockup.html`. `AssetBrowserView` is single-game;
