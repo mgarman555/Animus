@@ -95,7 +95,15 @@ src/
   `_meta.json`. "Geometry" omits the skeleton; "Export All" embeds it. `GltfModelExporter` now honours
   `ExportSettings.ExportSkeleton`. Armature button is disabled when a mesh has no parsed skeleton (all TLOU2
   Ellie character/clothing paks — `JOINT_HIERARCHY` is detected by `NdPakReader` but not yet parsed into
-  `SkeletonData`, so armature export is a no-op there until ND skeleton parsing lands).
+  `SkeletonData` for the Ellie paks specifically — see next bullet).
+- NaughtyDog skeleton (`NdJointHierarchyParser`): parses `JOINT_HIERARCHY` into `SkeletonData` by
+  **structure discovery** (find the name-pointer array → ASCII, the int32 parent tree, and the 4×4
+  bind-transform array by signature; accept only if names are joint-like AND parents form a valid
+  acyclic tree). Populates `mesh.Skeleton` in `NaughtyDogPlugin.LoadAssetAsync`, which auto-enables
+  the viewer's Armature toggle + export. **Unverified against a real `joint=True` pak** (Ellie paks
+  are joint-less; base-skeleton paks carry the joints) — names+parents are high-confidence; the
+  bind-pose translation layout (row-major vs inverse-bind) needs a Windows eyeball. Rich `NdJoint[…]`
+  Log output is the diagnostic; a failed/ambiguous parse returns null (no bogus skeleton).
 
 ### In Progress
 - **Multi-game UI shell + Codex/FModel hybrid** — see `design/ui-mockup.html`. `AssetBrowserView` is single-game;
@@ -104,9 +112,10 @@ src/
   decode in the viewer forces skip-untile for that reason)
 
 ### Planned
-- **ND skeleton parsing** — parse `JOINT_HIERARCHY` records into `SkeletonData` so the viewer's Armature
-  export produces real bones for TLOU2 (base-skeleton paks; Ellie character paks carry no embedded joints and
-  need a sibling base-skeleton pak loaded alongside)
+- **Verify ND skeleton parsing on Windows** — run `NdJointHierarchyParser` against a real base-skeleton
+  (`joint=True`) pak, confirm the discovered name/parent/transform arrays in the `NdJoint[…]` log, and fix the
+  bind-pose translation layout if bones look wrong. Then associate a character pak with its sibling
+  base-skeleton pak so Ellie (joint-less) meshes get a skeleton too.
 - FBX model export (CUE4Parse-Conversion)
 - Audio playback with waveform (NAudio)
 - Animation viewer with timeline scrubber
