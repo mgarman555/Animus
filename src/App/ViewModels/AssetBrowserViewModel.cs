@@ -117,15 +117,26 @@ public partial class AssetBrowserViewModel : ObservableObject
         if (engine is SotrEnginePlugin sotr)
         {
             sotr.SetBackgroundProgress(new Progress<string>(msg => StatusMessage = msg));
-            sotr.TypeScanCompleted += async (_, _) =>
-            {
-                // Rebuild tree on UI thread so type folders populate correctly
-                var assets = await engine.GetAllAssetsAsync();
-                _allAssets = assets;
-                BuildFileTree(assets);
-                BuildAssetGroups(assets);
-                StatusMessage = $"{assets.Count:N0} assets — type scan complete.";
-            };
+
+            // The event is raised on the indexer's pool thread, and GetAllAssetsAsync completes
+            // synchronously, so an async-void handler would run this whole body off the UI
+            // thread and mutate view-model state from there. Marshal it explicitly.
+            sotr.TypeScanCompleted += (_, _) =>
+                System.Windows.Application.Current?.Dispatcher.InvokeAsync(async () =>
+                {
+                    try
+                    {
+                        var assets = await engine.GetAllAssetsAsync();
+                        _allAssets = assets;
+                        BuildFileTree(assets);
+                        BuildAssetGroups(assets);
+                        StatusMessage = $"{assets.Count:N0} assets — resource index complete.";
+                    }
+                    catch (Exception ex)
+                    {
+                        StatusMessage = $"Tree rebuild failed: {ex.Message}";
+                    }
+                });
         }
     }
 

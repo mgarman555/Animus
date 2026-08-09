@@ -53,9 +53,12 @@ public class SotrEnginePlugin : IGameEngine
     private GameConfig?        _config;
     private volatile bool      _indexReady;
 
+    private CancellationTokenSource? _indexCts;
+    private Task?                    _indexTask;
+
     public string EngineName => "Foundation Engine";
     public string EngineId   => "SOTR";
-    public bool   IsMounted  => _archives.Archives.Count > 0;
+    public bool   IsMounted  => _archives.Count > 0;
 
     public IReadOnlyList<string> SupportedVersions => new[] { "SOTR-PC" };
     public IReadOnlyList<string> ArchiveExtensions => new[] { ".tiger" };
@@ -127,6 +130,10 @@ public class SotrEnginePlugin : IGameEngine
             BuildFileIndex();
         });
 
+        foreach (var shadowed in _archives.Shadowed)
+            progress?.Report($"  Ignored {Path.GetFileName(shadowed.IndexPath)}: another archive " +
+                             $"already claims id {shadowed.Id}.{shadowed.SubId}.");
+
         if (_files.Count == 0)
         {
             progress?.Report("Archives opened but no readable entries were found.");
@@ -150,7 +157,9 @@ public class SotrEnginePlugin : IGameEngine
         }
         else
         {
-            _ = Task.Run(RunResourceIndex);
+            _indexCts  = new CancellationTokenSource();
+            var token  = _indexCts.Token;
+            _indexTask = Task.Run(() => RunResourceIndex(token), token);
         }
 
         return true;
@@ -158,14 +167,25 @@ public class SotrEnginePlugin : IGameEngine
 
     public async Task UnmountGameAsync()
     {
+        // The index runs on a pool thread holding open FileStreams. Stop and join it before
+        // disposing anything, or it races the teardown and reopens handles into a dead reader.
+        _indexCts?.Cancel();
+        if (_indexTask != null)
+        {
+            try { await _indexTask.ConfigureAwait(false); }
+            catch { /* cancellation or a failed index must not block unmount */ }
+        }
+        _indexCts?.Dispose();
+        _indexCts  = null;
+        _indexTask = null;
+
         _archives.Dispose();
         _files.Clear();
         _resources.Clear();
         _nameCache.Clear();
-        _byPath.Clear();
+        lock (_byPath) _byPath.Clear();
         _indexReady = false;
         _config = null;
-        await Task.CompletedTask;
     }
 
     /// <summary>
@@ -191,7 +211,7 @@ public class SotrEnginePlugin : IGameEngine
     /// Parses every .drm collection and records the resources they point at. This is the pass
     /// that turns "a heap of hashed files" into a browsable, typed asset tree.
     /// </summary>
-    private void RunResourceIndex()
+    private void RunResourceIndex(CancellationToken token)
     {
         try
         {
@@ -204,10 +224,16 @@ public class SotrEnginePlugin : IGameEngine
             _progress?.Report($"Indexing {collections.Count:N0} collections…");
 
             int done = 0;
-            var opts = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(2, Environment.ProcessorCount / 2) };
+            var opts = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = Math.Max(2, Environment.ProcessorCount / 2),
+                CancellationToken      = token,
+            };
 
             Parallel.ForEach(collections, opts, item =>
             {
+                if (token.IsCancellationRequested) return;
+
                 var (entry, owner) = item;
                 try
                 {
@@ -223,12 +249,20 @@ public class SotrEnginePlugin : IGameEngine
                                       $"({_resources.Count:N0} found)");
             });
 
-            _indexReady = true;
+            if (token.IsCancellationRequested) return;
+
+            // Order matters: the lookup must be able to resolve a resource before
+            // GetAllAssetsAsync is allowed to advertise it.
             RebuildPathLookup();
+            _indexReady = true;
             SaveResourceCache(_config?.GameDirectory ?? "");
 
             _progress?.Report($"Resource index complete — {_resources.Count:N0} assets. Rebuilding tree…");
             TypeScanCompleted?.Invoke(this, EventArgs.Empty);
+        }
+        catch (OperationCanceledException)
+        {
+            // unmounted mid-scan; nothing to report
         }
         catch (Exception ex)
         {
@@ -268,8 +302,13 @@ public class SotrEnginePlugin : IGameEngine
     {
         var result = new List<AssetInfo>(_resources.Count + _files.Count);
 
-        foreach (var indexed in _resources.Values)
-            result.Add(ResourceToInfo(indexed));
+        // Only publish resources once the index is complete and _byPath knows about them.
+        // Listing them mid-scan would put assets in the tree that LoadAssetAsync cannot find.
+        if (_indexReady)
+        {
+            foreach (var indexed in _resources.Values)
+                result.Add(ResourceToInfo(indexed));
+        }
 
         // Every archive entry is listed too, so nothing in the game is unreachable —
         // manifests under /collections, anything else (stream data, tocs) under /files.
@@ -417,31 +456,29 @@ public class SotrEnginePlugin : IGameEngine
     {
         var mips = texture.SplitMips();
 
-        // When the engine streams the top levels from elsewhere, the largest level actually
-        // present is smaller than the texture's nominal size — report what we can decode.
-        int width  = mips.Count > 0 ? mips[0].Width  : texture.Width;
-        int height = mips.Count > 0 ? mips[0].Height : texture.Height;
-
-        props["Width"]     = width;
-        props["Height"]    = height;
+        props["Width"]     = texture.Width;
+        props["Height"]    = texture.Height;
         props["Format"]    = texture.FormatName;
+        props["DXGI"]      = texture.Format;
         props["MipCount"]  = mips.Count;
         props["Cube Map"]  = texture.IsCubeMap;
+        props["Depth"]     = texture.VolumeDepth;
         props["sRGB"]      = texture.IsSrgb;
         if (texture.HighResMipMapLevels > 0)
-        {
-            props["Nominal Size"]           = $"{texture.Width}x{texture.Height}";
-            props["Streamed High-Res Mips"] = texture.HighResMipMapLevels;
-        }
+            props["HighResMipMapLevels"] = texture.HighResMipMapLevels;
 
         var tex = new TextureAssetData
         {
-            Info          = info,
-            Width         = width,
-            Height        = height,
-            SourceFormat  = texture.FormatName,
-            IsSrgb        = texture.IsSrgb,
-            RawProperties = props,
+            Info             = info,
+            Width            = texture.Width,
+            Height           = texture.Height,
+            SourceFormat     = texture.FormatName,
+            // Carry the numeric format so the exporter never has to re-derive it from a name.
+            SourceDxgiFormat = texture.Format,
+            IsCubeMap        = texture.IsCubeMap,
+            Depth            = texture.VolumeDepth,
+            IsSrgb           = texture.IsSrgb,
+            RawProperties    = props,
         };
 
         foreach (var (mipWidth, mipHeight, data) in mips)

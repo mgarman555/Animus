@@ -183,6 +183,15 @@ where its bytes live in the archives. So the browsable asset is the **resource**
 Searching a `.drm` for a `DDS ` magic or a mesh header finds nothing. This is the trap the first
 version of this plugin fell into.
 
+### Gotchas that cost real debugging
+- `archiveId`/`archiveSubId` route a read to the archive that *owns* the data. If that archive isn't
+  mounted, **refuse the read** — falling back to the archive whose TOC listed the entry points the same
+  part/offset at an unrelated file and returns plausible-looking garbage
+- Only one archive per `(archiveId, subId)` may contribute TOC entries. A duplicate's entries would be
+  resolved back to the winner and read at the wrong offsets
+- The background resource index must publish `_byPath` **before** it flips its ready flag, or the tree
+  advertises assets that `LoadAssetAsync` can't find
+
 ### TAFS v5 archive (`bigfile.NNN.tiger`)
 - Header 56 B: `+0x00` magic `0x53464154` "TAFS", `+0x04` version=5, `+0x08` numParts,
   `+0x0C` numFiles, `+0x10` id, `+0x14` subId, `+0x18` platform[32] (`"pcx64-w"`)
@@ -221,8 +230,12 @@ On-disk magic bytes are **`CDRM`** (`0x4D524443` as a LE uint32) — *not* `MRDC
   `+0x16` depth, `+0x17` mipMapLevels, `+0x18` flags, `+0x1A` class, `+0x1B` tileMode
 - `flags & 0x2000` → a 0x100-byte block sits between header and surface; `flags & 0x8000` → cube map
 - Surface is **linear, all mips back to back, no offset table** — split by block size
-- `highResMipMapLevels > 0` means the top levels stream from elsewhere, so the payload starts partway
-  down the chain (the reader drops that many levels and reports the size it can actually decode)
+- The header's own `width`/`height`/`mipMapLevels` map **straight onto the payload**. Do **not** treat
+  `highResMipMapLevels` as "top levels live elsewhere" and shrink the starting dimensions — nothing in
+  the reference implementation reads that field (it declares it and never uses it), so doing so invents
+  a layout the format doesn't have. A short payload is handled by truncating the walk instead.
+- Cube maps (6 faces) and volume textures (`volumeDepth` slices) pack several surfaces into one blob
+  with no per-surface table — hand them over whole rather than mis-splitting them as a mip chain
 
 ### `.tr11modeldata` geometry
 - Header **0x160 B**: `+0x00` "Mesh", `+0x04` flags (`0x1` skinned, `0x4000` blend shapes),
@@ -242,8 +255,13 @@ On-disk magic bytes are **`CDRM`** (`0x4D524443` as a LE uint32) — *not* `MRDC
   SKIN_WEIGHTS `0x48E691C0`, SKIN_INDICES `0x5156D8D3`
 - Class → type via the TR11 table (`trmodelcommon.bt`). Class 21 (DEC4N) is **missing from that table
   upstream**; it is 10:10:10:2 normalised
-- MeshPart **0x60 B**: `+0x10` firstIndexIdx, `+0x14` numPrimitives, `+0x2C` lodLevel, `+0x30` materialIdx.
-  Parts are assigned to meshes in order, each mesh claiming `numParts` consecutive entries
+- **UVs need a ×16 scale.** Classes 25/26 (TEXCOORDS2/4) are 16-bit fixed point storing `uv / 16`, which
+  is how a >1 tiling coordinate fits in a normalised short. Skip it and every UV is 1/16 too small
+- MeshPart **0x60 B**: `+0x10` firstIndexIdx, `+0x14` numPrimitives, **`+0x1C` flags**, `+0x2C` lodLevel,
+  `+0x30` materialIdx. Parts are assigned to meshes in order, each mesh claiming `numParts` consecutive
+  entries — count a part toward that tally *before* skipping it, or the walk desyncs
+- **flags bit 0 = shadow-caster proxy**: invisible coarse geometry that exists only to cast shadows.
+  Merging it into the LOD silently doubles the mesh
 - Indices are **u16 and mesh-local** — rebase them when merging meshes into one LOD
 
 ### Not yet decoded

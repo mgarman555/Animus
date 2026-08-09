@@ -46,6 +46,7 @@ public sealed class TigerReader : IDisposable
 
     private readonly object _lock = new();
     private readonly Dictionary<int, FileStream> _partStreams = new();
+    private bool _disposed;
 
     public string IndexPath { get; }
     public int    Version   { get; private set; }
@@ -160,6 +161,10 @@ public sealed class TigerReader : IDisposable
 
     private FileStream GetPartStream(int part)
     {
+        // Without this, a read arriving after Dispose silently reopens the part file into the
+        // cleared dictionary and leaks the handle for the lifetime of the process.
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
         if (!_partStreams.TryGetValue(part, out var stream))
         {
             stream = new FileStream(GetPartFilePath(part), FileMode.Open, FileAccess.Read,
@@ -173,6 +178,7 @@ public sealed class TigerReader : IDisposable
     {
         lock (_lock)
         {
+            _disposed = true;
             foreach (var s in _partStreams.Values) s.Dispose();
             _partStreams.Clear();
         }

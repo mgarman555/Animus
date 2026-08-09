@@ -188,11 +188,15 @@ public static class SotrMeshParser
                 MeshIndex     = meshIdx,
                 FirstIndexIdx = (int)R32(d, b + 0x10),
                 NumPrimitives = (int)R32(d, b + 0x14),
+                Flags         = (int)R32(d, b + 0x1C),
                 LodLevel      = (short)R16(d, b + 0x2C),
                 MaterialIdx   = (long)R64(d, b + 0x30),
             };
-            claimed++;
+            claimed++;   // counted before any skip, so the part-to-mesh walk stays in step
 
+            // Bit 0 marks a shadow-caster proxy: invisible geometry that exists only to cast
+            // shadows. Merging it into the LOD doubles the mesh with a coarse duplicate.
+            if ((part.Flags & 1) != 0) continue;
             if (part.NumPrimitives <= 0) continue;
             if (part.FirstIndexIdx < 0 || part.FirstIndexIdx + part.NumPrimitives * 3 > numIndices) continue;
             if (meshes[part.MeshIndex] == null) continue;
@@ -359,6 +363,11 @@ public static class SotrMeshParser
             var type = ClassToType(cls);
             if (type == VertexType.Unsupported) continue;
 
+            // TEXCOORDS2/4 are 16-bit fixed point: the SNORM value is the UV divided by 16,
+            // which is how the format fits a >1 tiling coordinate into a normalised short.
+            // Without the scale every SOTTR UV comes out at 1/16 of its true magnitude.
+            float scale = (name == ATTR_TEXCOORD1 && (cls == 25 || cls == 26)) ? 16f : 1f;
+
             long baseOff = bufferOffsets[bufIdx];
             int  stride  = strides[bufIdx];
 
@@ -377,8 +386,8 @@ public static class SotrMeshParser
                 }
                 else
                 {
-                    uvs[v * 2]     = x;
-                    uvs[v * 2 + 1] = y;
+                    uvs[v * 2]     = x * scale;
+                    uvs[v * 2 + 1] = y * scale;
                 }
             }
 
@@ -529,6 +538,7 @@ public static class SotrMeshParser
         public int  MeshIndex     { get; init; }
         public int  FirstIndexIdx { get; init; }
         public int  NumPrimitives { get; init; }
+        public int  Flags         { get; init; }
         public int  LodLevel      { get; init; }
         public long MaterialIdx   { get; init; }
     }

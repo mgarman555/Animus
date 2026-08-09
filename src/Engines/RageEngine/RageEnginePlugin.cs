@@ -232,7 +232,6 @@ public class RageEnginePlugin : IGameEngine
 }
 
 /// <summary>Raw RPF file data for formats we haven't decoded further yet.</summary>
-public class RageRawAssetData : AssetData
+public class RageRawAssetData : RawAssetData
 {
-    public byte[] RawData { get; set; } = Array.Empty<byte>();
 }

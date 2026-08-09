@@ -71,6 +71,19 @@ public class TextureAssetData : AssetData
     /// <summary>Source pixel format from the game, e.g. "BC7", "BC1", "RGBA8"</summary>
     public string SourceFormat { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Numeric DXGI_FORMAT when the engine gave us one. Exporters should prefer this over
+    /// re-deriving a format from <see cref="SourceFormat"/>, which is a display string and
+    /// differs between plugins.
+    /// </summary>
+    public uint? SourceDxgiFormat { get; set; }
+
+    /// <summary>Six faces packed into the surface data — the mip list holds them as one blob.</summary>
+    public bool IsCubeMap { get; set; }
+
+    /// <summary>Slice count for volume textures; 1 for ordinary 2D textures.</summary>
+    public int Depth { get; set; } = 1;
+
     /// <summary>Texture category hint, e.g. "Diffuse", "Normal", "Roughness"</summary>
     public string TextureGroup { get; set; } = string.Empty;
 

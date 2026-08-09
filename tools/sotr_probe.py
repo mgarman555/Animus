@@ -29,7 +29,7 @@ import os
 import struct
 import sys
 import zlib
-from collections import Counter, defaultdict
+from collections import Counter
 
 # ── report plumbing ───────────────────────────────────────────────────────────
 
@@ -180,17 +180,27 @@ class TigerArchiveSet:
 
     def __init__(self):
         self.archives = []
+        self.shadowed = []
         self.by_id = {}
 
     def add(self, archive):
-        self.archives.append(archive)
-        self.by_id.setdefault((archive.id, archive.sub_id), archive)
+        # One archive per (id, subId); a later duplicate would have its TOC entries
+        # resolved back to the winner and read at the wrong file's offsets.
+        key = (archive.id, archive.sub_id)
+        if key in self.by_id:
+            self.shadowed.append(archive)
+        else:
+            self.by_id[key] = archive
+            self.archives.append(archive)
 
     def find(self, aid, asid):
         return self.by_id.get((aid, asid))
 
     def read_entry(self, entry, listed_in, chunk_limit=None):
-        owner = self.find(entry["aid"], entry["asid"]) or listed_in
+        # No fallback to listed_in: part/offset only mean anything inside the owning archive.
+        owner = self.find(entry["aid"], entry["asid"])
+        if owner is None:
+            return b""
         return owner.read_blob(entry["part"], entry["offset"], entry["usize"],
                                chunk_limit=chunk_limit)
 
@@ -205,7 +215,7 @@ class TigerArchiveSet:
         return data[skip:]
 
     def close(self):
-        for a in self.archives:
+        for a in self.archives + self.shadowed:
             a.close()
 
 
@@ -326,18 +336,16 @@ def parse_pcd9(body):
 
 
 def split_mips(tex):
+    # Mirrors SotrTextureReader.SplitMips: the header's own width/height/mipMapLevels map
+    # straight onto the payload. HighResMipMapLevels is deliberately not used to offset the
+    # walk — nothing in the reference implementation consumes it.
     if not tex["data"]:
         return []
     w, h = max(1, tex["width"]), max(1, tex["height"])
-    if tex["cube"]:
+    if tex["cube"] or tex["volume"] > 1:
         return [(w, h, tex["data"])]
 
     levels = tex["mips"]
-    for _ in range(tex["highres"]):
-        if levels <= 1:
-            break
-        w, h, levels = max(1, w // 2), max(1, h // 2), levels - 1
-
     out, offset = [], 0
     for _ in range(levels):
         if offset >= len(tex["data"]):
@@ -364,21 +372,24 @@ def write_dds(path, tex, mips):
     pf_flags = 0x4
     pf_fourcc = fourcc if fourcc else b"DX10"
 
+    cube = tex["cube"]
     flags = 0x1007 | (0x20000 if len(mips) > 1 else 0) | 0x80000
-    caps = 0x1000 | (0x400008 if len(mips) > 1 else 0)
+    caps = 0x1000 | (0x400008 if len(mips) > 1 else 0) | (0x8 if cube else 0)
+    caps2 = 0xFE00 if cube else 0
 
     header = struct.pack(
         "<4sIIIIIII44sIIIIIIIIIIIII",
         b"DDS ", 124, flags, tex["height"], tex["width"],
         len(mips[0][2]), 1, len(mips), b"\0" * 44,
         32, pf_flags, struct.unpack("<I", pf_fourcc)[0], 0, 0, 0, 0, 0,
-        caps, 0, 0, 0, 0)
+        caps, caps2, 0, 0, 0)
 
     with open(path, "wb") as fh:
         fh.write(header)
         if use_dx10:
             srgb_to_linear = {29: 28, 72: 71, 75: 74, 78: 77, 99: 98, 91: 87}
-            fh.write(struct.pack("<IIIII", srgb_to_linear.get(fmt, fmt), 3, 0, 1, 0))
+            fh.write(struct.pack("<IIIII", srgb_to_linear.get(fmt, fmt), 3,
+                                 4 if cube else 0, 1, 0))
         for _, _, data in mips:
             fh.write(data)
 
@@ -535,6 +546,9 @@ def parse_modeldata(body, verbose=False):
                 continue
             kind, count, tsize = spec
 
+            # TEXCOORDS2/4 are 16-bit fixed point: the stored SNORM is the UV over 16.
+            uv_scale = 16.0 if (name == ATTR_TEXCOORD1 and cls in (25, 26)) else 1.0
+
             base, stride = vb[buf_idx], strides[buf_idx]
             if not plausible(base, num_verts * stride):
                 continue
@@ -548,7 +562,8 @@ def parse_modeldata(body, verbose=False):
                     positions[v] = (vals[0], vals[1] if count > 1 else 0.0,
                                     vals[2] if count > 2 else 0.0)
                 else:
-                    uvs[v] = (vals[0], vals[1] if count > 1 else 0.0)
+                    uvs[v] = (vals[0] * uv_scale,
+                              (vals[1] if count > 1 else 0.0) * uv_scale)
             if name == ATTR_POSITION:
                 got_pos = True
 
@@ -570,9 +585,10 @@ def parse_modeldata(body, verbose=False):
         part = dict(mesh=mesh_idx,
                     first_index=i32(body, b + 0x10),
                     num_prims=i32(body, b + 0x14),
+                    flags=i32(body, b + 0x1C),
                     lod=i16(body, b + 0x2C),
                     material=u64(body, b + 0x30))
-        claimed += 1
+        claimed += 1          # counted before any skip, so the walk stays in step
         parts.append(part)
 
     m["indices"] = indices
@@ -585,6 +601,8 @@ def build_lods(m):
     """Merge mesh parts into LODs the way the C# does; returns {lod: (verts, uvs, tris)}."""
     lods = {}
     for part in m["parts"]:
+        if part["flags"] & 1:          # shadow-caster proxy, not visible geometry
+            continue
         if part["num_prims"] <= 0:
             continue
         mesh = m["meshes"][part["mesh"]]

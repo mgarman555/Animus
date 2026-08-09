@@ -9,40 +9,81 @@ namespace GameAssetExplorer.Engines.SotrEngine;
 /// *different* set than the one whose TOC you read it from: that indirection is how patches
 /// and DLC replace base-game data. Resolving through this set rather than through the
 /// owning <see cref="TigerReader"/> is what makes patched assets load correctly.
+///
+/// Those coordinates are only meaningful inside the archive that owns them, so a read whose
+/// (archiveId, subId) is not mounted is refused rather than redirected — pointing it at some
+/// other file's part index and offset would return plausible-looking garbage.
 /// </summary>
 public sealed class TigerArchiveSet : IDisposable
 {
+    private readonly object _lock = new();
     private readonly Dictionary<(int Id, int SubId), TigerReader> _byId = new();
     private readonly List<TigerReader> _archives = new();
+    private readonly List<TigerReader> _shadowed = new();
 
-    public IReadOnlyList<TigerReader> Archives => _archives;
+    /// <summary>
+    /// The archives whose TOCs should be harvested — one per (id, subId). Archives that lost
+    /// the race for an id are excluded: their entries would be resolved back to the winner and
+    /// read at the wrong file's offsets. They stay tracked only so <see cref="Dispose"/>
+    /// still closes them.
+    /// </summary>
+    public IReadOnlyList<TigerReader> Archives
+    {
+        get { lock (_lock) return _archives.ToArray(); }
+    }
+
+    /// <summary>Number of routable archives, without allocating a snapshot.</summary>
+    public int Count
+    {
+        get { lock (_lock) return _archives.Count; }
+    }
 
     public void Add(TigerReader archive)
     {
-        _archives.Add(archive);
-        // First archive claiming an id wins; duplicates are unusual but must not throw.
-        _byId.TryAdd((archive.Id, archive.SubId), archive);
+        lock (_lock)
+        {
+            if (_byId.TryAdd((archive.Id, archive.SubId), archive))
+                _archives.Add(archive);
+            else
+                _shadowed.Add(archive);
+        }
+    }
+
+    /// <summary>Archives that declared an id already claimed by another archive.</summary>
+    public IReadOnlyList<TigerReader> Shadowed
+    {
+        get { lock (_lock) return _shadowed.ToArray(); }
     }
 
     public TigerReader? Find(int archiveId, int archiveSubId)
-        => _byId.GetValueOrDefault((archiveId, archiveSubId));
+    {
+        lock (_lock) return _byId.GetValueOrDefault((archiveId, archiveSubId));
+    }
 
     /// <summary>
-    /// Reads a TOC entry's bytes, following its archiveId/subId to whichever archive
-    /// actually owns the data. Falls back to <paramref name="listedIn"/> when the target
-    /// set is missing (an uninstalled DLC, typically).
+    /// Reads a TOC entry's bytes from whichever archive its archiveId/subId names.
+    /// Returns an empty array when that archive is not mounted (an uninstalled DLC, typically).
     /// </summary>
     public byte[] ReadEntry(TigerEntry entry, TigerReader listedIn)
-    {
-        var owner = Find(entry.ArchiveId, entry.ArchiveSubId) ?? listedIn;
-        return owner.ReadBlob(entry.ArchivePart, entry.Offset, entry.UncompressedSize);
-    }
+        => ReadEntryCore(entry, listedIn, int.MaxValue);
 
     /// <summary>First CDRM chunk only — enough to identify a file without inflating it.</summary>
     public byte[] PeekEntry(TigerEntry entry, TigerReader listedIn)
+        => ReadEntryCore(entry, listedIn, chunkLimit: 1);
+
+    private byte[] ReadEntryCore(TigerEntry entry, TigerReader listedIn, int chunkLimit)
     {
-        var owner = Find(entry.ArchiveId, entry.ArchiveSubId) ?? listedIn;
-        return owner.ReadBlob(entry.ArchivePart, entry.Offset, entry.UncompressedSize, chunkLimit: 1);
+        var owner = Find(entry.ArchiveId, entry.ArchiveSubId);
+        if (owner == null)
+        {
+            Console.WriteLine(
+                $"[SOTR] {Path.GetFileName(listedIn.IndexPath)}: entry 0x{entry.NameHash:X16} " +
+                $"references archive {entry.ArchiveId}.{entry.ArchiveSubId}, which is not mounted.");
+            return Array.Empty<byte>();
+        }
+
+        return owner.ReadBlob(entry.ArchivePart, entry.Offset, entry.UncompressedSize,
+                              chunkLimit: chunkLimit);
     }
 
     /// <summary>
@@ -72,8 +113,13 @@ public sealed class TigerArchiveSet : IDisposable
 
     public void Dispose()
     {
-        foreach (var a in _archives) a.Dispose();
-        _archives.Clear();
-        _byId.Clear();
+        lock (_lock)
+        {
+            foreach (var a in _archives) a.Dispose();
+            foreach (var a in _shadowed) a.Dispose();
+            _archives.Clear();
+            _shadowed.Clear();
+            _byId.Clear();
+        }
     }
 }

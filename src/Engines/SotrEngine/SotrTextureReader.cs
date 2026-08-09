@@ -145,10 +145,17 @@ public sealed class SotrTextureReader
     /// Splits the surface into individual mip levels.
     ///
     /// A texture resource stores every level back to back with no offset table, so the split
-    /// has to be derived from the format's block layout. Two cases need care: when
-    /// <see cref="HighResMipMapLevels"/> is non-zero the engine streams the top levels from
-    /// elsewhere and the payload starts partway down the chain, and cube maps pack six faces
-    /// into the same blob — those are left whole rather than mis-split.
+    /// has to be derived from the format's block layout, starting at the header's own
+    /// Width/Height/MipMapLevels — the reference maps those three straight onto the payload.
+    ///
+    /// Cube maps (six faces) and volume textures (VolumeDepth slices) pack several surfaces
+    /// into the same blob with no per-surface table, so they are handed back whole rather
+    /// than mis-split into what would look like a mip chain.
+    ///
+    /// <see cref="HighResMipMapLevels"/> is deliberately NOT used to offset the walk. Nothing
+    /// in the reference implementation consumes it — it declares the field and never reads it
+    /// — so treating it as "top levels live elsewhere" would invent a layout the format does
+    /// not have. A short payload is instead handled by the truncation guard below.
     /// </summary>
     public List<(int Width, int Height, byte[] Data)> SplitMips()
     {
@@ -157,20 +164,13 @@ public sealed class SotrTextureReader
 
         int w = Math.Max(1, Width), h = Math.Max(1, Height);
 
-        if (IsCubeMap)
+        if (IsCubeMap || VolumeDepth > 1)
         {
             mips.Add((w, h, Data));
             return mips;
         }
 
         int levels = MipMapLevels;
-        for (int skipped = 0; skipped < HighResMipMapLevels && levels > 1; skipped++)
-        {
-            w = Math.Max(1, w / 2);
-            h = Math.Max(1, h / 2);
-            levels--;
-        }
-
         int offset = 0;
         for (int i = 0; i < levels && offset < Data.Length; i++)
         {

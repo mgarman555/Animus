@@ -27,15 +27,22 @@ public class DdsTextureExporter : IExporter
 
     private const uint DDS_HEADER_FLAGS_TEXTURE  = 0x00001007;
     private const uint DDS_HEADER_FLAGS_MIPMAP   = 0x00020000;
+    private const uint DDS_HEADER_FLAGS_PITCH      = 0x00000008;
     private const uint DDS_HEADER_FLAGS_LINEARSIZE = 0x00080000;
+    private const uint DDS_HEADER_FLAGS_VOLUME   = 0x00800000;
     private const uint DDS_SURFACE_FLAGS_TEXTURE = 0x00001000;
     private const uint DDS_SURFACE_FLAGS_MIPMAP  = 0x00400008;
+    private const uint DDS_SURFACE_FLAGS_CUBEMAP = 0x00000008;
+    private const uint DDS_CUBEMAP_ALLFACES      = 0x0000FE00;
+    private const uint DDS_RESOURCE_MISC_TEXTURECUBE = 0x00000004;
+    private const uint DDS_CAPS2_VOLUME          = 0x00200000;
 
     private const uint DDS_FOURCC = 0x00000004;
     private const uint DDS_RGB    = 0x00000040;
     private const uint DDS_RGBA   = 0x00000041;
 
     private const uint DDS_DIMENSION_TEXTURE2D = 3;
+    private const uint DDS_DIMENSION_TEXTURE3D = 4;
 
     public async Task<ExportResult> ExportAsync(
         AssetData assetData,
@@ -116,13 +123,20 @@ public class DdsTextureExporter : IExporter
 
     private static byte[] BuildDds(TextureAssetData texture)
     {
-        GetPixelFormat(texture.SourceFormat, out uint pfFlags, out uint fourCc, out uint bitCount,
+        GetPixelFormat(texture, out uint pfFlags, out uint fourCc, out uint bitCount,
                        out uint rMask, out uint gMask, out uint bMask, out uint aMask,
-                       out uint dxgiFormat);
+                       out uint dxgiFormat, out bool blockCompressed);
 
-        bool useDx10 = fourCc == MakeFourCc("DX10");
+        bool useDx10  = fourCc == MakeFourCc("DX10");
+        bool cube     = texture.IsCubeMap;
+        int  depth    = Math.Max(1, texture.Depth);
+        bool volume   = depth > 1;
         int  mipCount = texture.Mips.Count;
         int  surfaceBytes = texture.Mips.Sum(m => m.Data.Length);
+
+        // A cube map's six faces share one blob, so the top-level size is a sixth of it.
+        uint topLevel = (uint)texture.Mips[0].Data.Length;
+        if (cube) topLevel /= 6;
 
         using var ms = new MemoryStream(148 + surfaceBytes);
         using var bw = new BinaryWriter(ms);
@@ -132,11 +146,15 @@ public class DdsTextureExporter : IExporter
         bw.Write(124u);                                                  // dwSize
         bw.Write(DDS_HEADER_FLAGS_TEXTURE
                  | (mipCount > 1 ? DDS_HEADER_FLAGS_MIPMAP : 0)
-                 | DDS_HEADER_FLAGS_LINEARSIZE);
+                 | (volume ? DDS_HEADER_FLAGS_VOLUME : 0)
+                 // Block-compressed surfaces declare a linear size; uncompressed ones a row pitch.
+                 | (blockCompressed ? DDS_HEADER_FLAGS_LINEARSIZE : DDS_HEADER_FLAGS_PITCH));
         bw.Write((uint)texture.Height);
         bw.Write((uint)texture.Width);
-        bw.Write((uint)texture.Mips[0].Data.Length);                     // pitchOrLinearSize
-        bw.Write(1u);                                                    // depth
+        bw.Write(blockCompressed
+                     ? topLevel
+                     : (uint)(((long)texture.Width * bitCount + 7) / 8));  // pitchOrLinearSize
+        bw.Write((uint)depth);
         bw.Write((uint)mipCount);
         for (int i = 0; i < 11; i++) bw.Write(0u);                       // reserved1
 
@@ -149,8 +167,11 @@ public class DdsTextureExporter : IExporter
         bw.Write(bMask);
         bw.Write(aMask);
 
-        bw.Write(DDS_SURFACE_FLAGS_TEXTURE | (mipCount > 1 ? DDS_SURFACE_FLAGS_MIPMAP : 0));
-        bw.Write(0u);                                                    // caps2
+        bw.Write(DDS_SURFACE_FLAGS_TEXTURE
+                 | (mipCount > 1 ? DDS_SURFACE_FLAGS_MIPMAP : 0)
+                 | (cube ? DDS_SURFACE_FLAGS_CUBEMAP : 0));              // caps
+        bw.Write((cube ? DDS_CUBEMAP_ALLFACES : 0u)
+                 | (volume ? DDS_CAPS2_VOLUME : 0u));                    // caps2
         bw.Write(0u);                                                    // caps3
         bw.Write(0u);                                                    // caps4
         bw.Write(0u);                                                    // reserved2
@@ -158,8 +179,8 @@ public class DdsTextureExporter : IExporter
         if (useDx10)
         {
             bw.Write(dxgiFormat);
-            bw.Write(DDS_DIMENSION_TEXTURE2D);
-            bw.Write(0u);                                                // miscFlag
+            bw.Write(volume ? DDS_DIMENSION_TEXTURE3D : DDS_DIMENSION_TEXTURE2D);
+            bw.Write(cube ? DDS_RESOURCE_MISC_TEXTURECUBE : 0u);         // miscFlag
             bw.Write(1u);                                                // arraySize
             bw.Write(0u);                                                // miscFlags2
         }
@@ -171,68 +192,97 @@ public class DdsTextureExporter : IExporter
         return ms.ToArray();
     }
 
-    private static void GetPixelFormat(string format,
+    /// <summary>
+    /// Resolves the DDS pixel-format block for a texture.
+    ///
+    /// The numeric <see cref="TextureAssetData.SourceDxgiFormat"/> is authoritative when the
+    /// plugin supplied one; <see cref="TextureAssetData.SourceFormat"/> is a display string
+    /// whose spelling differs between engines, so it is only a fallback. An unrecognised
+    /// format throws rather than guessing: silently stamping a BC7 header onto, say, a 32-bit
+    /// float surface produces a file that opens and decodes to noise, which is far worse than
+    /// a failed export.
+    /// </summary>
+    private static void GetPixelFormat(TextureAssetData texture,
                                        out uint flags, out uint fourCc, out uint bitCount,
                                        out uint rMask, out uint gMask, out uint bMask, out uint aMask,
-                                       out uint dxgiFormat)
+                                       out uint dxgiFormat, out bool blockCompressed)
     {
         flags = fourCc = bitCount = rMask = gMask = bMask = aMask = 0;
         dxgiFormat = 0;
 
-        switch (Normalize(format))
+        string name = Normalize(texture.SourceFormat);
+
+        // Legacy FourCC formats first — older tools read these without a DX10 header.
+        switch (name)
         {
             case "DXT1" or "BC1":
-                flags = DDS_FOURCC; fourCc = MakeFourCc("DXT1");
+                flags = DDS_FOURCC; fourCc = MakeFourCc("DXT1"); blockCompressed = true;
                 return;
 
             case "DXT3" or "BC2":
-                flags = DDS_FOURCC; fourCc = MakeFourCc("DXT3");
+                flags = DDS_FOURCC; fourCc = MakeFourCc("DXT3"); blockCompressed = true;
                 return;
 
             case "DXT5" or "BC3":
-                flags = DDS_FOURCC; fourCc = MakeFourCc("DXT5");
+                flags = DDS_FOURCC; fourCc = MakeFourCc("DXT5"); blockCompressed = true;
                 return;
 
-            case "BC4" or "ATI1N":
-                flags = DDS_FOURCC; fourCc = MakeFourCc("DX10"); dxgiFormat = 80;
-                return;
-
-            case "BC5" or "ATI2N":
-                flags = DDS_FOURCC; fourCc = MakeFourCc("DX10"); dxgiFormat = 83;
-                return;
-
-            case "BC6H":
-                flags = DDS_FOURCC; fourCc = MakeFourCc("DX10"); dxgiFormat = 95;
-                return;
-
-            case "BC7":
-                flags = DDS_FOURCC; fourCc = MakeFourCc("DX10"); dxgiFormat = 98;
-                return;
-
-            case "R8":
+            case "R8" or "G8" or "R8_UNORM":
                 flags = DDS_RGB; bitCount = 8; rMask = 0xFF;
-                return;
-
-            case "R8G8":
-                flags = DDS_FOURCC; fourCc = MakeFourCc("DX10"); dxgiFormat = 49;
+                blockCompressed = false;
                 return;
 
             case "BGRA8" or "B8G8R8A8":
                 flags = DDS_RGBA; bitCount = 32;
                 bMask = 0x000000FF; gMask = 0x0000FF00; rMask = 0x00FF0000; aMask = 0xFF000000;
+                blockCompressed = false;
                 return;
 
-            case "RGBA8" or "R8G8B8A8":
+            case "RGBA8" or "R8G8B8A8" or "RGBA" or "A8R8G8B8":
                 flags = DDS_RGBA; bitCount = 32;
                 rMask = 0x000000FF; gMask = 0x0000FF00; bMask = 0x00FF0000; aMask = 0xFF000000;
-                return;
-
-            default:
-                // Unknown name: fall back to BC7, the most common modern surface.
-                flags = DDS_FOURCC; fourCc = MakeFourCc("DX10"); dxgiFormat = 98;
+                blockCompressed = false;
                 return;
         }
+
+        // Everything else goes out as DX10 carrying the numeric DXGI value.
+        uint dxgi = name switch
+        {
+            "BC4" or "ATI1N" or "BC4U" => 80,
+            "BC5" or "ATI2N" or "BC5U" => 83,
+            "BC6H"                     => 95,
+            "BC7"                      => 98,
+            "R8G8"                     => 49,
+            _                          => 0,
+        };
+
+        // Prefer whatever the plugin actually read out of the file over a display string.
+        if (dxgi == 0 && texture.SourceDxgiFormat is uint fromPlugin && fromPlugin != 0)
+            dxgi = fromPlugin;
+
+        // "DXGI:123" is a reader's fallback spelling for a format with no short name.
+        if (dxgi == 0 && name.StartsWith("DXGI:", StringComparison.Ordinal))
+            uint.TryParse(name.AsSpan(5), out dxgi);
+
+        if (dxgi == 0)
+            throw new NotSupportedException(
+                $"No DDS mapping for texture format '{texture.SourceFormat}'.");
+
+        dxgiFormat      = MapSrgbToLinear(dxgi);
+        flags           = DDS_FOURCC;
+        fourCc          = MakeFourCc("DX10");
+        blockCompressed = IsBlockCompressed(dxgiFormat);
     }
+
+    private static bool IsBlockCompressed(uint dxgi)
+        => dxgi is >= 70 and <= 84 or >= 94 and <= 99;
+
+    /// <summary>Blender and most importers reject the _SRGB DXGI values.</summary>
+    private static uint MapSrgbToLinear(uint dxgi) => dxgi switch
+    {
+        29 => 28, 72 => 71, 75 => 74, 78 => 77, 91 => 87, 99 => 98,
+        _  => dxgi,
+    };
 
     /// <summary>CUE4Parse reports EPixelFormat names like "PF_BC5"; strip the prefix for matching.</summary>
     private static string Normalize(string format)
