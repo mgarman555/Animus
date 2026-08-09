@@ -53,6 +53,13 @@ src/
     NaughtyDog/                  # TLOU2 .pak binary parser (custom format)
       NdPakMeshParser.cs         # Geometry decoding (quantised bitstream)
       PsarcReader.cs             # PSARC archive reader
+    SotrEngine/                  # Shadow of the Tomb Raider (Foundation Engine, .tiger)
+      Cdrm.cs                    # CDRM compressed-blob container (chunked zlib)
+      TigerReader.cs             # TAFS v5 archive: header, TOC, blob reads
+      TigerArchiveSet.cs         # Archives keyed by (archiveId, subId); resolves resources
+      SotrDrmReader.cs           # .drm ResourceCollection — a manifest, not a container
+      SotrTextureReader.cs       # PCD9 texture header → mip chain
+      SotrMeshParser.cs          # .tr11modeldata geometry
     RageEngine/                  # GTA5 / RDR2 (RPF archives) — stub
 
   Exporters/
@@ -88,6 +95,10 @@ src/
 - NaughtyDog per-submesh textures: plugin resolves each submesh's diffuse to full-res via `texturedict3`;
   `SkeletalMeshViewerWindow` decodes + paints each submesh its own `ImageBrush` (PNG-verified; GUI eyeball pending)
 - Mesh-level diffuse: VRAM_DESC scan + full-res `texturedict3` hash lookup + BCnEncoder decode + ImageBrush
+- SOTR (Shadow of the Tomb Raider): TAFS v5 archives + CDRM decompression, .drm ResourceCollection
+  parsing, resource index with %AppData% cache, PCD9 textures, `.tr11modeldata` geometry
+- Raw export for any asset without a decoder (`RawAssetData`), so nothing is unexportable
+- DDS texture export (`DdsTextureExporter`) — lossless, keeps mips, covers R8/R8G8/BC6H which PNG can't
 
 ### In Progress
 - **Multi-game UI shell + Codex/FModel hybrid** — see `design/ui-mockup.html`. `AssetBrowserView` is single-game;
@@ -152,6 +163,89 @@ Each submesh resolves its own material+textures via the `m_material` fixup point
 
 ---
 
+## Shadow of the Tomb Raider (Foundation Engine) — Key Facts
+
+Reverse-engineered against **arcusmaximus/TrRebootModTools** (MIT) and cross-checked with
+`cdcengine.re`. Byte-level logic re-verified in `tools/sotr_format_check.py` (run it — it tests the
+CDRM path against real zlib, plus every struct offset below).
+
+### The thing to internalise: `.drm` is a MANIFEST, not a container
+`.tiger` archives hold *files* (FNV-1 64 hash → bytes). Nearly all are `.drm`, and a `.drm` holds
+**no pixels and no vertices** — it is a table of the resources some content needs, each pointing at
+where its bytes live in the archives. So the browsable asset is the **resource**, not the tiger entry.
+Searching a `.drm` for a `DDS ` magic or a mesh header finds nothing. This is the trap the first
+version of this plugin fell into.
+
+### TAFS v5 archive (`bigfile.NNN.tiger`)
+- Header 56 B: `+0x00` magic `0x53464154` "TAFS", `+0x04` version=5, `+0x08` numParts,
+  `+0x0C` numFiles, `+0x10` id, `+0x14` subId, `+0x18` platform[32] (`"pcx64-w"`)
+- TOC entry **32 B**: `+0x00` nameHash(u64), `+0x08` locale(u64), `+0x10` uncompressedSize,
+  `+0x14` compressedSize, `+0x18` archivePart(i16), `+0x1A` **archiveId**(u8),
+  `+0x1B` **archiveSubId**(u8), `+0x1C` offset(u32)
+- `archiveId`/`archiveSubId` select **which archive set** owns the data — often *not* the one whose
+  TOC you read it from. That indirection is how patches and DLC override base files; always resolve
+  through `TigerArchiveSet`, never the local reader
+- Part path: trailing `000.tiger` → `{part:D3}.tiger`
+
+### CDRM compression (the five things that were wrong before)
+On-disk magic bytes are **`CDRM`** (`0x4D524443` as a LE uint32) — *not* `MRDC`.
+- Container: `+0x00` magic, `+0x04` type, `+0x08` numChunks, `+0x0C` unused
+- Chunk table at `+0x10`: numChunks × `{ u32 packed (uncompressed size = `>> 8`), u32 compressedSize }`
+- Payloads start at **align16(0x10 + 8×numChunks)**, and **each payload is padded to 16 bytes**
+- `compressedSize == uncompressedSize` → stored verbatim
+- Otherwise **skip 2 bytes** (zlib header) and inflate the rest as **raw Deflate**
+
+### DRM v23 ResourceCollection
+- Header 32 B: `+0x00` version=23, `+0x04` includeLength, `+0x08` dependenciesLength,
+  `+0x0C` paddingLength, `+0x10` size, `+0x14` flags, `+0x18` numResources, `+0x1C` mainResourceIndex
+- `+0x20` locale(u64), then in order: identifications, **dependencies, then includes**
+  (note: read order is the reverse of the header field order), then locations
+- ResourceIdentification **24 B**: `+0x00` bodySize, `+0x04` type(u8, 1=Empty→disabled),
+  `+0x08` packed → `subType = (v & 0xFF) >> 1`, `refDefinitionsSize = v >> 8`; `+0x0C` id, `+0x10` locale
+- ResourceLocation **24 B**: `+0x00` uniqueKey (`type = >>24`, `id = & 0xFFFFFF`), `+0x08` archivePart(i16),
+  `+0x0A` archiveId, `+0x0B` archiveSubId, `+0x0C` offset, `+0x10` sizeInArchive, `+0x14` decompressionOffset
+- **Type comes from the location record, subType from the identification record** — deliberately split
+- Resource bytes = `[refDefinitions][body]`; stored raw iff `refDefinitionsSize + bodySize == sizeInArchive`,
+  otherwise CDRM. `decompressionOffset` is repack bookkeeping and is not needed to read
+
+### Textures are PCD9, not DDS
+- 28 B header: `+0x00` magic `0x39444350` ("PCD9"), `+0x04` **DXGI format number**, `+0x08` size,
+  `+0x0C` highResMipMapLevels, `+0x10` width(u16), `+0x12` height(u16), `+0x14` volumeDepth,
+  `+0x16` depth, `+0x17` mipMapLevels, `+0x18` flags, `+0x1A` class, `+0x1B` tileMode
+- `flags & 0x2000` → a 0x100-byte block sits between header and surface; `flags & 0x8000` → cube map
+- Surface is **linear, all mips back to back, no offset table** — split by block size
+- `highResMipMapLevels > 0` means the top levels stream from elsewhere, so the payload starts partway
+  down the chain (the reader drops that many levels and reports the size it can actually decode)
+
+### `.tr11modeldata` geometry
+- Header **0x160 B**: `+0x00` "Mesh", `+0x04` flags (`0x1` skinned, `0x4000` blend shapes),
+  `+0x0C` numIndices, `+0x20` bboxMin, `+0x30` bboxMax, `+0x70` modelType, `+0xF8` meshPartsOffset,
+  `+0x100` meshHeadersOffset, `+0x118` indexDataOffset, `+0x120` numMeshParts/Meshes/Bones/LodLevels (u16 ×4),
+  `+0x128` preTesselationInfoOffset (`0xFFFFFFFF` = absent)
+- **Header pointer fields are offsets relative to the start of the resource body.** Proven by the
+  blend-shape block, which addresses its sub-tables as `bodyStart + offset`. Drive the parse off these
+  rather than walking sequentially — meshes with blend shapes have a variable-size block in the middle
+  and a sequential walk desyncs at the first one
+- MeshHeader **0x60 B**: `+0x00` numParts, `+0x04` numBones, `+0x10`/`+0x20` vertex buffer offsets,
+  `+0x30` vertexFormatSize, `+0x38` vertexFormatOffset, `+0x48` numVertices
+- VertexFormat: `+0x08` numAttributes, `+0x0A` vertexSizes[2] (stride per buffer), attributes at `+0x10`,
+  **8 B each**: `+0x00` nameHash, `+0x04` offset(i16), `+0x06` class, `+0x07` vertexBufferIdx.
+  Size is always `0x10 + 8 × numAttributes`
+- Attribute hashes: POSITION `0xD2F7D823`, NORMAL `0x36F5E414`, TEXCOORD1 `0x8317902A`,
+  SKIN_WEIGHTS `0x48E691C0`, SKIN_INDICES `0x5156D8D3`
+- Class → type via the TR11 table (`trmodelcommon.bt`). Class 21 (DEC4N) is **missing from that table
+  upstream**; it is 10:10:10:2 normalised
+- MeshPart **0x60 B**: `+0x10` firstIndexIdx, `+0x14` numPrimitives, `+0x2C` lodLevel, `+0x30` materialIdx.
+  Parts are assigned to meshes in order, each mesh claiming `numParts` consecutive entries
+- Indices are **u16 and mesh-local** — rebase them when merging meshes into one LOD
+
+### Not yet decoded
+Skeletons/skinning, blend shapes, animations (`.tr11anim`), materials (`.tr11material` — texture
+bindings would let the viewer texture SOTR meshes the way it does TLOU2), Wwise `.bnk` stream extraction.
+All of these still export as raw bytes.
+
+---
+
 ## Test Assets (on Madi's PC)
 
 | Path | Contents |
@@ -162,3 +256,4 @@ Each submesh resolves its own material+textures via the `m_material` fixup point
 | Installed UE4 games | Jedi Fallen Order, Jedi Survivor (encrypted) |
 | Installed UE5 games | Fortnite (encrypted), Hellblade |
 | Installed RAGE games | GTA5, Red Dead Redemption 2 |
+| Shadow of the Tomb Raider install | `bigfile.000.tiger` + parts — needed to validate the SOTR plugin (never yet run against real data) |

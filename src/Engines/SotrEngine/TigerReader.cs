@@ -1,4 +1,3 @@
-using System.IO.Compression;
 using System.Text;
 
 namespace GameAssetExplorer.Engines.SotrEngine;
@@ -6,82 +5,85 @@ namespace GameAssetExplorer.Engines.SotrEngine;
 /// <summary>
 /// Reads TAFS v5 archives — Shadow of the Tomb Raider PC (Foundation Engine, Eidos-Montréal).
 ///
-/// Format references:
-///   https://cdcengine.re/docs/files/tiger/
-///   https://github.com/Ekey/CDCE.TIGER.Tool      (MIT — Ekey)
-///   https://github.com/arcusmaximus/TrRebootModTools (MIT — arcusmaximus)
+/// Layout verified against arcusmaximus/TrRebootModTools (MIT) Shared/Cdc/Archive.cs +
+/// Shared/Cdc/Shadow/ShadowArchive.cs, cross-checked with https://cdcengine.re/docs/files/tiger/.
 ///
-/// Archive layout (all little-endian):
-///   Header  56 bytes
-///     +0x00  uint32   magic   = 0x53464154 ("TAFS")
-///     +0x04  int32    version = 5
-///     +0x08  int32    numParts
-///     +0x0C  int32    numFiles
-///     +0x10  int32    id
-///     +0x14  int32    subId   (v5 only)
-///     +0x18  char[32] platform ("pcx64-w\0...")
-///   TOC  numFiles × 32 bytes
-///     +0x00  uint64  nameHash         FNV-1A 64-bit hash of asset path
-///     +0x08  uint64  locale           language/locale bitmask (0 = common)
-///     +0x10  int32   decompressedSize uncompressed byte count
-///     +0x14  int32   compressedSize   on-disk byte count (may be 0 when equal to decompressedSize)
-///     +0x18  uint16  tigerPart        which .NNN.tiger data file contains this entry
-///     +0x1A  uint16  priority         load-priority for conflict resolution
-///     +0x1C  uint32  offset           absolute byte offset inside the part file
+/// Header — 56 bytes, little-endian:
+///   +0x00  uint32   magic   = 0x53464154 ("TAFS")
+///   +0x04  int32    version = 5
+///   +0x08  int32    numParts
+///   +0x0C  int32    numFiles
+///   +0x10  int32    id
+///   +0x14  int32    subId      (v5 only)
+///   +0x18  char[32] platform   ("pcx64-w\0…")
 ///
-/// MRDC compression (raw Deflate, chunk-based):
-///   Magic "MRDC" (4 bytes) at start of entry data.
-///   Followed by one or more chunks until decompressedSize bytes are produced:
-///     uint32  header     — bits[31:8] = decompressed chunk size, bits[7:0] = flags
-///     uint32  compSize   — compressed byte count for this chunk
-///     byte[]  data       — raw Deflate bytes; stored uncompressed when compSize == decompChunkSize
+/// TOC — numFiles × 32 bytes:
+///   +0x00  uint64  nameHash          FNV-1 64 of the asset path
+///   +0x08  uint64  locale            language/platform bitmask
+///   +0x10  uint32  uncompressedSize
+///   +0x14  uint32  compressedSize
+///   +0x18  int16   archivePart       which .NNN.tiger holds the data
+///   +0x1A  uint8   archiveId         which archive *set* holds it
+///   +0x1B  uint8   archiveSubId
+///   +0x1C  uint32  offset            byte offset inside the part file
 ///
-/// Part file naming: replace last "000.tiger" in the index path with "{part:D3}.tiger".
-///   bigfile.000.tiger → bigfile.005.tiger  (part 5)
-///   bigfile.dlc.outfit.4.002.000.tiger → bigfile.dlc.outfit.4.002.003.tiger  (part 3)
+/// archiveId/archiveSubId matter: an entry listed in one archive's TOC may point at data
+/// owned by a different archive (that is how patches and DLC override base-game files), so
+/// blobs are always resolved through <see cref="TigerArchiveSet"/> rather than locally.
+///
+/// Part file naming: the trailing "000.tiger" becomes "{part:D3}.tiger" —
+/// bigfile.000.tiger → bigfile.005.tiger.
+///
+/// Blob data is either raw or wrapped in a <see cref="Cdrm"/> container.
 /// </summary>
 public sealed class TigerReader : IDisposable
 {
-    public const uint Magic = 0x53464154;   // "TAFS" in memory
+    public const uint Magic = 0x53464154;   // "TAFS"
 
     private const int HEADER_SIZE   = 56;
     private const int TOC_ENTRY_SZ  = 32;
-    private const int MRDC_CHUNK_SZ = 0x40000;  // max 256 KB per chunk
+    private const string PART_SUFFIX = ".000.tiger";
 
-    private readonly string _indexPath;
     private readonly object _lock = new();
-    private readonly Dictionary<ushort, FileStream> _partStreams = new();
+    private readonly Dictionary<int, FileStream> _partStreams = new();
 
-    public string IndexPath => _indexPath;
-    public int NumParts { get; private set; }
-    public int NumFiles { get; private set; }
+    public string IndexPath { get; }
+    public int    Version   { get; private set; }
+    public int    NumParts  { get; private set; }
+    public int    NumFiles  { get; private set; }
+    public int    Id        { get; private set; }
+    public int    SubId     { get; private set; }
+    public string Platform  { get; private set; } = string.Empty;
+
     public List<TigerEntry> Entries { get; } = new();
 
-    public TigerReader(string indexPath) => _indexPath = indexPath;
+    public TigerReader(string indexPath) => IndexPath = indexPath;
 
     // ── Open ─────────────────────────────────────────────────────────────────
 
     public void Open()
     {
-        using var fs = new FileStream(_indexPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var fs = new FileStream(IndexPath, FileMode.Open, FileAccess.Read, FileShare.Read);
         using var br = new BinaryReader(fs, Encoding.ASCII, leaveOpen: true);
 
         uint magic = br.ReadUInt32();
         if (magic != Magic)
             throw new InvalidDataException(
-                $"Not a TAFS archive (magic=0x{magic:X8}): {Path.GetFileName(_indexPath)}");
+                $"Not a TAFS archive (magic=0x{magic:X8}): {Path.GetFileName(IndexPath)}");
 
-        int version = br.ReadInt32();
-        if (version != 5)
+        Version = br.ReadInt32();
+        if (Version != 5)
             throw new NotSupportedException(
-                $"Tiger version {version} not supported — only v5 (Shadow of the Tomb Raider) is implemented.");
+                $"Tiger version {Version} not supported — only v5 (Shadow of the Tomb Raider) is implemented.");
 
-        NumParts         = br.ReadInt32();
-        NumFiles         = br.ReadInt32();
-        /* id    */       br.ReadInt32();
-        /* subId */       br.ReadInt32();   // v5 addition
-        /* platform */    br.ReadBytes(32); // "pcx64-w\0..."
-        // 4+4+4+4+4+4+32 = 56 bytes consumed
+        NumParts = br.ReadInt32();
+        NumFiles = br.ReadInt32();
+        Id       = br.ReadInt32();
+        SubId    = br.ReadInt32();
+        Platform = Encoding.ASCII.GetString(br.ReadBytes(32)).TrimEnd('\0');
+
+        if (NumFiles < 0 || (long)NumFiles * TOC_ENTRY_SZ > fs.Length - HEADER_SIZE)
+            throw new InvalidDataException($"TAFS file count out of range ({NumFiles}).");
 
         Entries.Capacity = NumFiles;
         for (int i = 0; i < NumFiles; i++)
@@ -91,190 +93,89 @@ public sealed class TigerReader : IDisposable
                 Ordinal          = i,
                 NameHash         = br.ReadUInt64(),
                 Locale           = br.ReadUInt64(),
-                DecompressedSize = br.ReadInt32(),
-                CompressedSize   = br.ReadInt32(),
-                TigerPart        = br.ReadUInt16(),
-                Priority         = br.ReadUInt16(),
+                UncompressedSize = br.ReadUInt32(),
+                CompressedSize   = br.ReadUInt32(),
+                ArchivePart      = br.ReadInt16(),
+                ArchiveId        = br.ReadByte(),
+                ArchiveSubId     = br.ReadByte(),
                 Offset           = br.ReadUInt32(),
             });
         }
     }
 
-    // ── Extract ───────────────────────────────────────────────────────────────
+    // ── Blob reads ───────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Reads the raw bytes for an entry from the appropriate part file.
-    /// If the data starts with "MRDC", applies chunk-based Deflate decompression.
-    /// Thread-safe: multiple concurrent extracts from the same reader are safe.
+    /// Reads a blob from one of this archive's part files, transparently inflating it
+    /// when it is CDRM-compressed.
     /// </summary>
-    public byte[] ExtractEntry(TigerEntry entry)
+    /// <param name="assumeUncompressed">
+    /// Skip the CDRM probe. Set when the caller already knows the blob is stored raw —
+    /// a resource whose refDefinitions + body exactly fill its archive slot.
+    /// </param>
+    /// <param name="chunkLimit">Cap on CDRM chunks to inflate; 1 peeks at the head cheaply.</param>
+    public byte[] ReadBlob(int part, uint offset, uint length,
+                           bool assumeUncompressed = false, int chunkLimit = int.MaxValue)
     {
-        if (entry.DecompressedSize <= 0) return Array.Empty<byte>();
-
         lock (_lock)
         {
-            var stream = GetPartStream(entry.TigerPart);
-            stream.Seek(entry.Offset, SeekOrigin.Begin);
+            var stream = GetPartStream(part);
 
-            // Peek first 4 bytes for MRDC magic without disturbing the read position
-            var magic4 = new byte[4];
-            int got = stream.Read(magic4, 0, 4);
-            if (got < 4) return Array.Empty<byte>();
-            stream.Seek(entry.Offset, SeekOrigin.Begin);
+            if (!assumeUncompressed && Cdrm.HasMagic(stream, offset))
+                return Cdrm.Decompress(stream, offset, chunkLimit);
 
-            bool isMrdc = magic4[0] == 'M' && magic4[1] == 'R'
-                       && magic4[2] == 'D' && magic4[3] == 'C';
+            if (length == 0) return Array.Empty<byte>();
 
-            if (!isMrdc)
-            {
-                // Uncompressed — read exactly DecompressedSize bytes
-                var buf = new byte[entry.DecompressedSize];
-                ReadFully(stream, buf);
-                return buf;
-            }
+            long available = Math.Max(0, stream.Length - offset);
+            int  count     = (int)Math.Min(length, available);
+            if (count <= 0) return Array.Empty<byte>();
 
-            // MRDC: seek past magic, decompress chunks
-            stream.Seek(entry.Offset + 4, SeekOrigin.Begin);
-            return DecompressMrdc(stream, entry.DecompressedSize);
+            var buffer = new byte[count];
+            stream.Seek(offset, SeekOrigin.Begin);
+            stream.ReadExactly(buffer, 0, count);
+            return buffer;
         }
     }
 
-    // ── Peek (cheap first-chunk read for type classification) ────────────────
+    /// <summary>Full contents of a TOC entry.</summary>
+    public byte[] ReadEntry(TigerEntry entry)
+        => ReadBlob(entry.ArchivePart, entry.Offset, entry.UncompressedSize);
 
     /// <summary>
-    /// Returns up to <paramref name="count"/> decompressed bytes from the entry without
-    /// extracting the full asset. For MRDC data only the first chunk is decompressed.
-    /// Used by the background type scanner.
+    /// First CDRM chunk of a TOC entry (or the whole thing when stored raw).
+    /// Used by the background indexer, which only needs the head of each file.
     /// </summary>
-    /// <summary>
-    /// Returns the first decompressed chunk of an entry without extracting the full asset.
-    /// For MRDC data only the first Deflate chunk is decompressed (up to 256 KB).
-    /// For uncompressed entries the full entry bytes are returned.
-    /// Used by the background type scanner — much cheaper than ExtractEntry.
-    /// </summary>
-    public byte[] PeekBytes(TigerEntry entry)
+    public byte[] PeekEntry(TigerEntry entry)
+        => ReadBlob(entry.ArchivePart, entry.Offset, entry.UncompressedSize, chunkLimit: 1);
+
+    // ── Part files ───────────────────────────────────────────────────────────
+
+    public string GetPartFilePath(int part)
     {
-        if (entry.DecompressedSize <= 0) return Array.Empty<byte>();
-
-        lock (_lock)
-        {
-            var stream = GetPartStream(entry.TigerPart);
-            stream.Seek(entry.Offset, SeekOrigin.Begin);
-
-            var magic4 = new byte[4];
-            if (stream.Read(magic4, 0, 4) < 4) return Array.Empty<byte>();
-
-            bool isMrdc = magic4[0] == 'M' && magic4[1] == 'R'
-                       && magic4[2] == 'D' && magic4[3] == 'C';
-
-            if (!isMrdc)
-            {
-                // Uncompressed — return the whole thing (usually small)
-                stream.Seek(entry.Offset, SeekOrigin.Begin);
-                var buf = new byte[entry.DecompressedSize];
-                ReadFully(stream, buf);
-                return buf;
-            }
-
-            // MRDC: decompress the first chunk in full — no byte limit
-            stream.Seek(entry.Offset + 4, SeekOrigin.Begin);
-            return DecompressMrdcFirstChunk(stream);
-        }
+        if (IndexPath.EndsWith(PART_SUFFIX, StringComparison.OrdinalIgnoreCase))
+            return string.Concat(IndexPath.AsSpan(0, IndexPath.Length - PART_SUFFIX.Length),
+                                 $".{part:D3}.tiger");
+        return IndexPath;
     }
 
-    private static byte[] DecompressMrdcFirstChunk(Stream src)
-    {
-        using var br = new BinaryReader(src, System.Text.Encoding.ASCII, leaveOpen: true);
-
-        uint hdr      = br.ReadUInt32();
-        uint compSz   = br.ReadUInt32();
-        int  decompSz = (int)(hdr >> 8);
-        if (decompSz == 0 || compSz == 0) return Array.Empty<byte>();
-
-        if (compSz == (uint)decompSz)
-            return br.ReadBytes((int)compSz);   // stored uncompressed
-
-        var compressed = br.ReadBytes((int)compSz);
-        using var ms      = new System.IO.MemoryStream(compressed);
-        using var deflate = new DeflateStream(ms, CompressionMode.Decompress);
-        var chunk = new byte[decompSz];
-        deflate.ReadExactly(chunk, 0, decompSz);
-        return chunk;
-    }
-
-    // ── MRDC decompression ────────────────────────────────────────────────────
-
-    private static byte[] DecompressMrdc(Stream src, int expectedSize)
-    {
-        using var output = new MemoryStream(Math.Max(expectedSize, 4096));
-        using var br     = new BinaryReader(src, Encoding.ASCII, leaveOpen: true);
-
-        while (output.Length < expectedSize)
-        {
-            // chunk header: bits[31:8] = decompressed chunk size
-            uint hdr       = br.ReadUInt32();
-            uint compSz    = br.ReadUInt32();
-            int  decompSz  = (int)(hdr >> 8);
-
-            if (decompSz == 0 || compSz == 0) break;
-
-            // Clamp to remaining needed so we don't over-write
-            int needed = expectedSize - (int)output.Length;
-            int outSz  = Math.Min(decompSz, needed);
-
-            if (compSz == (uint)decompSz)
-            {
-                // Stored uncompressed — copy directly
-                var raw = br.ReadBytes((int)compSz);
-                output.Write(raw, 0, Math.Min(raw.Length, outSz));
-            }
-            else
-            {
-                // Raw Deflate (no zlib header/Adler checksum)
-                var compressed = br.ReadBytes((int)compSz);
-                using var ms      = new MemoryStream(compressed);
-                using var deflate = new DeflateStream(ms, CompressionMode.Decompress);
-                var decompressed  = new byte[decompSz];
-                deflate.ReadExactly(decompressed, 0, decompSz);
-                output.Write(decompressed, 0, outSz);
-            }
-        }
-
-        return output.ToArray();
-    }
-
-    // ── Part file access ──────────────────────────────────────────────────────
-
-    private FileStream GetPartStream(ushort part)
+    private FileStream GetPartStream(int part)
     {
         if (!_partStreams.TryGetValue(part, out var stream))
         {
-            // Replace the last "000.tiger" segment with "{part:D3}.tiger"
-            // Works for both base game (bigfile.000.tiger) and DLC (bigfile.dlc.*.000.tiger)
-            const int suffixLen = 9; // "000.tiger".Length
-            string partPath = _indexPath[..^suffixLen] + $"{part:D3}.tiger";
-            stream = new FileStream(partPath, FileMode.Open, FileAccess.Read,
+            stream = new FileStream(GetPartFilePath(part), FileMode.Open, FileAccess.Read,
                                     FileShare.Read, bufferSize: 131072, useAsync: false);
             _partStreams[part] = stream;
         }
         return stream;
     }
 
-    private static void ReadFully(Stream stream, byte[] buf)
-    {
-        int read = 0;
-        while (read < buf.Length)
-        {
-            int n = stream.Read(buf, read, buf.Length - read);
-            if (n == 0) break;
-            read += n;
-        }
-    }
-
     public void Dispose()
     {
-        foreach (var s in _partStreams.Values) s.Dispose();
-        _partStreams.Clear();
+        lock (_lock)
+        {
+            foreach (var s in _partStreams.Values) s.Dispose();
+            _partStreams.Clear();
+        }
     }
 }
 
@@ -284,18 +185,17 @@ public sealed class TigerEntry
 {
     /// <summary>Zero-based position in the TOC.</summary>
     public int    Ordinal          { get; init; }
-    /// <summary>FNV-1A 64-bit hash of the asset path — used as the primary identifier.</summary>
+    /// <summary>FNV-1 64-bit hash of the asset path — the primary identifier.</summary>
     public ulong  NameHash         { get; init; }
-    /// <summary>Locale bitmask: 0 = common (all languages), non-zero = language-specific.</summary>
+    /// <summary>Language / voice / platform bitmask. 0xFFFF… = applies everywhere.</summary>
     public ulong  Locale           { get; init; }
-    /// <summary>Uncompressed byte count of the asset data.</summary>
-    public int    DecompressedSize { get; init; }
-    /// <summary>On-disk byte count. May be 0 when the entry is stored uncompressed.</summary>
-    public int    CompressedSize   { get; init; }
-    /// <summary>Which .NNN.tiger data file contains this entry (0 = the index file itself).</summary>
-    public ushort TigerPart        { get; init; }
-    /// <summary>Load priority for conflict resolution across archives.</summary>
-    public ushort Priority         { get; init; }
-    /// <summary>Absolute byte offset from the start of the part file.</summary>
+    public uint   UncompressedSize { get; init; }
+    public uint   CompressedSize   { get; init; }
+    /// <summary>Which .NNN.tiger part holds the data (0 = the index file itself).</summary>
+    public short  ArchivePart      { get; init; }
+    /// <summary>Which archive set owns the data — not necessarily the one listing this entry.</summary>
+    public byte   ArchiveId        { get; init; }
+    public byte   ArchiveSubId     { get; init; }
+    /// <summary>Byte offset from the start of the part file.</summary>
     public uint   Offset           { get; init; }
 }

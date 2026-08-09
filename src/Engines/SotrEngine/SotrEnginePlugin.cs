@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
-using System.IO.Compression;
 using System.Reflection;
+using System.Text;
 using GameAssetExplorer.Core.Interfaces;
 using GameAssetExplorer.Core.Models;
 
@@ -9,52 +9,62 @@ namespace GameAssetExplorer.Engines.SotrEngine;
 /// <summary>
 /// Engine plugin for Shadow of the Tomb Raider (2018) PC — Foundation Engine (Eidos-Montréal).
 ///
-/// Asset naming:
-///   TAFS archives store FNV-64 hashes. A 335K-entry hash→path dictionary
-///   (SOTR_PC_Release.list, MIT — arcusmaximus/TrRebootModTools) is bundled as an
-///   embedded resource and loaded automatically at mount — no external files required.
+/// How the game actually stores things, and why this plugin is shaped the way it is:
 ///
-/// Virtual path structure (type-first):
-///   /models/{resolved-path-or-hash}
-///   /textures/{resolved-path-or-hash}
-///   /audio/{resolved-path-or-hash}
-///   /animations/{resolved-path-or-hash}
-///   /levels/{resolved-path-or-hash}
-///   /other/{resolved-path-or-hash}
+///   .tiger archives hold *files*, keyed by an FNV-1 64 hash of their path. Almost every one
+///   of those files is a .drm — and a .drm is a manifest, not a container. It holds no pixels
+///   and no vertices. What it holds is a table of the resources a piece of content needs,
+///   each with the archive, part, offset and size where that resource's bytes live.
 ///
-///   Resolved paths strip the "pcx64-w\" platform prefix and use forward slashes.
-///   Example: pcx64-w\characters\lara\outfit_01\lara_body.drm
-///         → /models/characters/lara/outfit_01/lara_body.drm
+///   So the browsable asset is the *resource*, not the tiger entry. Mounting reads the
+///   archive TOCs (fast); a background pass then parses every .drm and builds the resource
+///   index that the tree is actually built from. That index is cached under %AppData% so the
+///   second mount is instant.
 ///
-/// Type detection:
-///   • Raw DDS / RIFF / OGG magic → classified immediately
-///   • DRM v23 wrapper → background scan reads the primary section type
-///   • Results cached to %AppData%\GameAssetExplorer\sotr-{key}-types.bin
-///     so the tree is fully classified from the second mount onward
+/// Virtual path layout, type-first to match the other engine plugins:
+///   /textures/{collection path}/Texture_{id}.dds
+///   /models/{collection path}/Model_{id}.tr11modeldata
+///   /animations/… /audio/… /materials/… /collision/… /data/… /scripts/… /strings/… /other/…
+///   /collections/{path}.drm                 — the manifests themselves
+///   /files/{path}                           — every other archive entry, so nothing is hidden
+///
+/// Asset naming comes from the bundled 335K-entry hash→path dictionary
+/// (SOTR_PC_Release.list, MIT — arcusmaximus/TrRebootModTools), embedded in the assembly.
 /// </summary>
 public class SotrEnginePlugin : IGameEngine
 {
     // ── Events / state ────────────────────────────────────────────────────────
 
-    /// <summary>Fires once the background type scan finishes. Used to trigger a tree rebuild.</summary>
+    /// <summary>Fires once the background resource index finishes. Triggers a tree rebuild.</summary>
     public event EventHandler? TypeScanCompleted;
 
-    private readonly List<TigerReader>                    _readers   = new();
-    private readonly List<string>                         _slugs     = new();
-    private readonly List<(TigerEntry E, int R)>          _index     = new();
-    private readonly Dictionary<string, int>              _byPath    = new(StringComparer.Ordinal);
-    private readonly Dictionary<ulong, string>            _nameCache = new();   // hash → resolved path
-    private readonly ConcurrentDictionary<ulong, AssetType> _typeMap = new();  // hash → asset type
+    private readonly TigerArchiveSet _archives = new();
+
+    /// <summary>Every tiger TOC entry, after patch/DLC override resolution.</summary>
+    private readonly List<(TigerEntry Entry, TigerReader Owner)> _files = new();
+
+    /// <summary>Resource index built by the background pass, unique per (type, id, locale).</summary>
+    private readonly ConcurrentDictionary<(SotrResourceType, int, ulong), IndexedResource> _resources = new();
+
+    private readonly Dictionary<ulong, string> _nameCache = new();   // path hash → path
+    private readonly Dictionary<string, object> _byPath   = new(StringComparer.OrdinalIgnoreCase);
 
     private IProgress<string>? _progress;
-    private GameConfig?         _config;
+    private GameConfig?        _config;
+    private volatile bool      _indexReady;
 
     public string EngineName => "Foundation Engine";
     public string EngineId   => "SOTR";
-    public bool   IsMounted  => _readers.Count > 0;
+    public bool   IsMounted  => _archives.Archives.Count > 0;
 
     public IReadOnlyList<string> SupportedVersions => new[] { "SOTR-PC" };
     public IReadOnlyList<string> ArchiveExtensions => new[] { ".tiger" };
+
+    /// <summary>False while the background resource index is still running.</summary>
+    public bool IsResourceIndexReady => _indexReady;
+
+    /// <summary>Resources discovered so far by the background index.</summary>
+    public int ResourceCount => _resources.Count;
 
     public void SetBackgroundProgress(IProgress<string>? p) => _progress = p;
 
@@ -72,21 +82,16 @@ public class SotrEnginePlugin : IGameEngine
 
     public async Task<bool> MountGameAsync(GameConfig config, IProgress<string>? progress = null)
     {
-        _config = config;
+        _config   = config;
         _progress = progress;
 
-        // Step 1: load the bundled 335K-entry hash→path dictionary
         progress?.Report("Loading asset name dictionary…");
         await Task.Run(LoadBundledHashList);
         progress?.Report($"  {_nameCache.Count:N0} paths loaded from built-in dictionary.");
 
-        // Step 2: load the type cache from a previous scan (if it exists)
-        LoadTypeCache(config.GameDirectory);
-
-        // Step 3: open all .000.tiger index files and read their TOCs
         var indexFiles = SafeEnumerateFiles(config.GameDirectory, "*.tiger")
             .Where(f => Path.GetFileName(f).EndsWith(".000.tiger", StringComparison.OrdinalIgnoreCase))
-            .OrderBy(f => f)
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
         if (indexFiles.Length == 0)
@@ -96,28 +101,18 @@ public class SotrEnginePlugin : IGameEngine
         }
 
         progress?.Report($"Found {indexFiles.Length} archive(s). Reading TOCs…");
+
         await Task.Run(() =>
         {
-            for (int i = 0; i < indexFiles.Length; i++)
+            foreach (var path in indexFiles)
             {
-                string path = indexFiles[i];
-                string slug = ArchiveSlug(path);
-                progress?.Report($"[{i + 1}/{indexFiles.Length}] {Path.GetFileName(path)}");
                 try
                 {
-                    var reader = new TigerReader(path);
-                    reader.Open();
-                    int rid = _readers.Count;
-                    _readers.Add(reader);
-                    _slugs.Add(slug);
-
-                    foreach (var entry in reader.Entries)
-                    {
-                        int flatIdx = _index.Count;
-                        _index.Add((entry, rid));
-                        _byPath[MakeVirtualPath(entry)] = flatIdx;
-                    }
-                    progress?.Report($"  → {reader.NumFiles:N0} entries");
+                    var archive = new TigerReader(path);
+                    archive.Open();
+                    _archives.Add(archive);
+                    progress?.Report($"  {Path.GetFileName(path)} → {archive.NumFiles:N0} entries " +
+                                     $"(id {archive.Id}.{archive.SubId})");
                 }
                 catch (NotSupportedException ex)
                 {
@@ -128,44 +123,159 @@ public class SotrEnginePlugin : IGameEngine
                     Console.WriteLine($"[SOTR] {Path.GetFileName(path)}: {ex.Message}");
                 }
             }
+
+            BuildFileIndex();
         });
 
-        int resolved = _index.Count(t => _nameCache.ContainsKey(t.E.NameHash));
+        if (_files.Count == 0)
+        {
+            progress?.Report("Archives opened but no readable entries were found.");
+            return false;
+        }
+
+        // Make the collections loadable straight away; the resource index adds to this later.
+        RebuildPathLookup();
+
+        int named = _files.Count(f => _nameCache.ContainsKey(f.Entry.NameHash));
         progress?.Report(
-            $"Mounted {_index.Count:N0} assets. " +
-            $"{resolved:N0} named ({100.0 * resolved / Math.Max(1, _index.Count):F0}%). " +
-            $"Running type scan in background…");
+            $"Mounted {_files.Count:N0} files. {named:N0} named " +
+            $"({100.0 * named / Math.Max(1, _files.Count):F0}%). Indexing resources…");
 
-        // Step 4: background type scan — classifies every asset and saves the type cache
-        _ = Task.Run(() => RunBackgroundTypeScan());
+        if (LoadResourceCache(config.GameDirectory))
+        {
+            _indexReady = true;
+            progress?.Report($"Resource index loaded from cache — {_resources.Count:N0} assets.");
+            RebuildPathLookup();
+            TypeScanCompleted?.Invoke(this, EventArgs.Empty);
+        }
+        else
+        {
+            _ = Task.Run(RunResourceIndex);
+        }
 
-        return _index.Count > 0;
+        return true;
     }
 
     public async Task UnmountGameAsync()
     {
-        SaveTypeCache(_config?.GameDirectory ?? "");
-        foreach (var r in _readers) r.Dispose();
-        _readers.Clear();
-        _slugs.Clear();
-        _index.Clear();
-        _byPath.Clear();
+        _archives.Dispose();
+        _files.Clear();
+        _resources.Clear();
         _nameCache.Clear();
-        _typeMap.Clear();
+        _byPath.Clear();
+        _indexReady = false;
         _config = null;
         await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Collapses TOC entries down to one per (nameHash, locale). Later archives — patches and
+    /// DLC, which sort after the base bigfile — replace earlier ones, matching load order.
+    /// </summary>
+    private void BuildFileIndex()
+    {
+        var winner = new Dictionary<(ulong, ulong), (TigerEntry Entry, TigerReader Owner)>();
+
+        foreach (var archive in _archives.Archives)
+        {
+            foreach (var entry in archive.Entries)
+                winner[(entry.NameHash, entry.Locale)] = (entry, archive);
+        }
+
+        _files.AddRange(winner.Values);
+    }
+
+    // ── Background resource index ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Parses every .drm collection and records the resources they point at. This is the pass
+    /// that turns "a heap of hashed files" into a browsable, typed asset tree.
+    /// </summary>
+    private void RunResourceIndex()
+    {
+        try
+        {
+            var collections = _files
+                .Where(IsCollection)
+                .OrderBy(f => f.Entry.ArchivePart)
+                .ThenBy(f => f.Entry.Offset)
+                .ToList();
+
+            _progress?.Report($"Indexing {collections.Count:N0} collections…");
+
+            int done = 0;
+            var opts = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(2, Environment.ProcessorCount / 2) };
+
+            Parallel.ForEach(collections, opts, item =>
+            {
+                var (entry, owner) = item;
+                try
+                {
+                    byte[] raw = _archives.ReadEntry(entry, owner);
+                    var collection = SotrDrmReader.TryParse(raw);
+                    if (collection != null) RegisterResources(entry.NameHash, collection);
+                }
+                catch { /* a single unreadable collection must not abort the pass */ }
+
+                int n = Interlocked.Increment(ref done);
+                if (n % 2000 == 0 || n == collections.Count)
+                    _progress?.Report($"Indexing resources… {n:N0} / {collections.Count:N0} " +
+                                      $"({_resources.Count:N0} found)");
+            });
+
+            _indexReady = true;
+            RebuildPathLookup();
+            SaveResourceCache(_config?.GameDirectory ?? "");
+
+            _progress?.Report($"Resource index complete — {_resources.Count:N0} assets. Rebuilding tree…");
+            TypeScanCompleted?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[SOTR] Resource index failed: {ex.Message}");
+            _progress?.Report($"Resource index failed: {ex.Message}");
+        }
+    }
+
+    private void RegisterResources(ulong collectionHash, SotrDrmReader collection)
+    {
+        foreach (var resource in collection.Resources)
+        {
+            if (!resource.Enabled || resource.Length == 0) continue;
+            if (resource.Type == SotrResourceType.Unknown || resource.Type == SotrResourceType.Empty) continue;
+
+            _resources.TryAdd(resource.Key, new IndexedResource
+            {
+                Resource         = resource,
+                CollectionHash   = collectionHash,
+            });
+        }
+    }
+
+    private bool IsCollection((TigerEntry Entry, TigerReader Owner) file)
+    {
+        if (_nameCache.TryGetValue(file.Entry.NameHash, out string? name))
+            return name.EndsWith(".drm", StringComparison.OrdinalIgnoreCase);
+
+        // Unnamed entry: a v23 header in the first bytes identifies a collection.
+        try   { return SotrDrmReader.LooksLikeDrm(_archives.PeekEntry(file.Entry, file.Owner)); }
+        catch { return false; }
     }
 
     // ── Asset listing ─────────────────────────────────────────────────────────
 
     public Task<IReadOnlyList<AssetInfo>> GetAllAssetsAsync()
     {
-        var result = new List<AssetInfo>(_index.Count);
-        for (int i = 0; i < _index.Count; i++)
-        {
-            var (entry, rid) = _index[i];
-            result.Add(EntryToInfo(entry, rid));
-        }
+        var result = new List<AssetInfo>(_resources.Count + _files.Count);
+
+        foreach (var indexed in _resources.Values)
+            result.Add(ResourceToInfo(indexed));
+
+        // Every archive entry is listed too, so nothing in the game is unreachable —
+        // manifests under /collections, anything else (stream data, tocs) under /files.
+        foreach (var (entry, owner) in _files)
+            result.Add(FileToInfo(entry, owner));
+
         return Task.FromResult<IReadOnlyList<AssetInfo>>(result);
     }
 
@@ -180,410 +290,512 @@ public class SotrEnginePlugin : IGameEngine
         }).ToList();
     }
 
+    private void RebuildPathLookup()
+    {
+        lock (_byPath)
+        {
+            _byPath.Clear();
+            foreach (var indexed in _resources.Values)
+                _byPath[ResourceVirtualPath(indexed)] = indexed;
+
+            foreach (var (entry, owner) in _files)
+                _byPath[FileVirtualPath(entry)] = (entry, owner);
+        }
+    }
+
     // ── Asset loading ─────────────────────────────────────────────────────────
 
     public async Task<AssetData> LoadAssetAsync(AssetInfo asset)
     {
-        if (!_byPath.TryGetValue(asset.VirtualPath, out int flatIdx))
+        object? target;
+        lock (_byPath) _byPath.TryGetValue(asset.VirtualPath, out target);
+
+        if (target == null)
             throw new Exception($"Asset not found: {asset.VirtualPath}");
 
-        var (entry, rid) = _index[flatIdx];
-        var reader = _readers[rid];
+        if (target is IndexedResource indexed)
+            return await Task.Run(() => LoadResource(asset, indexed)).ConfigureAwait(false);
 
-        byte[] raw = await Task.Run(() => reader.ExtractEntry(entry)).ConfigureAwait(false);
-
-        var props = BuildBaseProps(entry, reader);
-        if (raw.Length >= 4)
-            props["DataMagic"] = $"0x{BitConverter.ToUInt32(raw, 0):X8}";
-
-        AssetType type = ClassifyAsset(raw, out int ddsOffset);
-
-        // Update type map on first load (also updates the cached type)
-        if (type != AssetType.Unknown)
-            _typeMap[entry.NameHash] = type;
-
-        if (type == AssetType.Texture && ddsOffset >= 0)
-            return BuildTextureAsset(asset, raw, ddsOffset, props);
-
-        if (type == AssetType.Audio)
-            return BuildAudioAsset(asset, raw, props);
-
-        // Attempt to extract geometry from DRM mesh sections (type 2 = CDCRenderModel)
-        bool isDrmMesh = raw.Length >= 4 && BitConverter.ToUInt32(raw, 0) == 23 &&
-                         (type == AssetType.StaticMesh || type == AssetType.SkeletalMesh ||
-                          type == AssetType.Unknown);
-
-        if (isDrmMesh)
-        {
-            AnnotateDrmProps(raw, props);
-            props["_RawSize"] = raw.Length;
-
-            var meshData = DrmMeshParser.TryParse(raw, asset);
-            if (meshData != null)
-            {
-                // Merge DRM annotation props into the parsed mesh's RawProperties
-                foreach (var (k, v) in props)
-                    meshData.RawProperties.TryAdd(k, v);
-
-                // Update the asset type so the UI shows the correct icon/tab
-                asset.Type = meshData.Lods[0].VertexCount > 0
-                    ? AssetType.StaticMesh
-                    : AssetType.Unknown;
-                _typeMap[entry.NameHash] = asset.Type;
-
-                return meshData;
-            }
-        }
-        else if (raw.Length >= 4 && BitConverter.ToUInt32(raw, 0) == 23)
-        {
-            AnnotateDrmProps(raw, props);
-        }
-
-        props["_RawSize"] = raw.Length;
-        return new SotrRawAssetData { Info = info(asset, type), RawData = raw, RawProperties = props };
+        var (entry, owner) = ((TigerEntry, TigerReader))target;
+        return await Task.Run(() => LoadArchiveFile(asset, entry, owner)).ConfigureAwait(false);
     }
 
-    private static AssetInfo info(AssetInfo src, AssetType t)
+    private AssetData LoadResource(AssetInfo info, IndexedResource indexed)
     {
-        src.Type = t;
-        return src;
-    }
+        var resource = indexed.Resource;
+        byte[]? body = _archives.ReadResourceBody(resource);
 
-    // ── Background type scan ──────────────────────────────────────────────────
-
-    private void RunBackgroundTypeScan()
-    {
-        try
+        var props = new Dictionary<string, object?>
         {
-            // Classify only entries not already in the type map
-            var todo = _index
-                .Where(t => !_typeMap.ContainsKey(t.E.NameHash))
-                .OrderBy(t => t.E.TigerPart)
-                .ThenBy(t => t.E.Offset)
-                .ToList();
+            ["Resource Type"] = resource.Type.ToString(),
+            ["Resource SubType"] = DescribeSubType(resource),
+            ["Resource Id"]   = resource.Id,
+            ["Locale"]        = DescribeLocale(resource.Locale),
+            ["Archive"]       = $"{resource.ArchiveId}.{resource.ArchiveSubId} part {resource.ArchivePart}",
+            ["Offset"]        = $"0x{resource.Offset:X8}",
+            ["Size In Archive"] = resource.Length,
+            ["Body Size"]     = resource.BodySize,
+            ["RefDefinitions Size"] = resource.RefDefinitionsSize,
+            ["Collection"]    = ResolveName(indexed.CollectionHash),
+        };
 
-            if (todo.Count == 0)
-            {
-                _progress?.Report("Type scan: all assets already classified.");
-                TypeScanCompleted?.Invoke(this, EventArgs.Empty);
-                return;
-            }
-
-            int done = 0;
-            var opts = new ParallelOptions { MaxDegreeOfParallelism = 3 };
-
-            Parallel.ForEach(todo, opts, item =>
-            {
-                var (entry, rid) = item;
-                var reader = _readers[rid];
-                try
-                {
-                    // PeekBytes decompresses the full first MRDC chunk — gives enough data
-                    // to reach the DRM section headers even for heavily-relocated assets
-                    byte[] peek = reader.PeekBytes(entry);
-                    AssetType t = ClassifyFromPeek(peek, entry);
-                    if (t != AssetType.Unknown)
-                        _typeMap[entry.NameHash] = t;
-                }
-                catch { /* best-effort: leave unclassified */ }
-
-                int n = Interlocked.Increment(ref done);
-                if (n % 2000 == 0 || n == todo.Count)
-                    _progress?.Report($"Classifying… {n:N0} / {todo.Count:N0}");
-            });
-
-            SaveTypeCache(_config?.GameDirectory ?? "");
-            _progress?.Report($"Type scan complete. Rebuilding tree…");
-            TypeScanCompleted?.Invoke(this, EventArgs.Empty);
+        if (body == null || body.Length == 0)
+        {
+            props["_RawSize"] = 0;
+            return new SotrRawAssetData { Info = info, RawData = Array.Empty<byte>(), RawProperties = props };
         }
-        catch (Exception ex)
+
+        props["_RawSize"] = body.Length;
+
+        if (resource.Type == SotrResourceType.Texture)
         {
-            Console.WriteLine($"[SOTR] Background type scan failed: {ex.Message}");
+            var texture = SotrTextureReader.TryRead(body);
+            if (texture != null) return BuildTextureAsset(info, texture, props);
         }
-    }
 
-    // ── Type classification ────────────────────────────────────────────────────
-
-    private AssetType ClassifyFromPeek(byte[] peek, TigerEntry entry)
-    {
-        // 1. Extension-based fast path — instant when name resolved from hash list
-        if (_nameCache.TryGetValue(entry.NameHash, out string? name))
+        if (resource.Type == SotrResourceType.Model && resource.SubType == SotrResourceSubType.ModelData)
         {
-            string ext  = Path.GetExtension(name).ToLowerInvariant();
-            string file = Path.GetFileNameWithoutExtension(name).ToLowerInvariant();
-            string dir  = (Path.GetDirectoryName(name) ?? "").ToLowerInvariant().Replace('\\', '/');
-
-            AssetType extType = ext switch
+            var mesh = SotrMeshParser.TryParse(body, info);
+            if (mesh != null)
             {
-                ".dds"           => AssetType.Texture,
-                ".fsb" or ".mul" => AssetType.Audio,
-                ".anm"           => AssetType.Animation,
-                _                => AssetType.Unknown
-            };
-            if (extType != AssetType.Unknown) return extType;
-
-            // SOTR naming conventions for .drm files:
-            //   an_*  = animation sequences
-            //   ahst_* / ahztl_* = animation hosts / scripted sequences
-            //   path contains "sounds/" or "audio/" or "music/" → audio
-            //   path contains "textures/" → texture
-            //   path contains "levels/" or "worlds/" → level
-            if (ext == ".drm")
-            {
-                if (file.StartsWith("an_", StringComparison.Ordinal)
-                 || file.StartsWith("ahst_", StringComparison.Ordinal)
-                 || file.StartsWith("ahztl_", StringComparison.Ordinal)
-                 || file.StartsWith("anim_", StringComparison.Ordinal))
-                    return AssetType.Animation;
-
-                if (dir.Contains("sounds") || dir.Contains("audio") || dir.Contains("music"))
-                    return AssetType.Audio;
-
-                if (dir.Contains("textures") || dir.Contains("texture"))
-                    return AssetType.Texture;
-
-                if (dir.Contains("levels") || dir.Contains("worlds") || dir.Contains("maps"))
-                    return AssetType.Level;
-
-                // Default: most .drm files are models/objects/characters/props
-                // The DRM section-type check below will override this when it can
+                foreach (var (k, v) in props) mesh.RawProperties.TryAdd(k, v);
+                info.Type = mesh.IsSkeletal ? AssetType.SkeletalMesh : AssetType.StaticMesh;
+                mesh.Info = info;
+                return mesh;
             }
         }
 
-        // 2. Magic / DRM section type from decompressed bytes
-        AssetType fromMagic = ClassifyAsset(peek, out _);
-        if (fromMagic != AssetType.Unknown) return fromMagic;
+        if (resource.Type == SotrResourceType.SoundBank)
+            return BuildAudioAsset(info, body, props);
 
-        // 3. Final fallback: unresolved or unclassified .drm → treat as model (statistically correct)
-        //    (statistically correct — the majority of SOTR DRM files are meshes/objects)
-        if (peek.Length >= 4 && BitConverter.ToUInt32(peek, 0) == 23)
-            return AssetType.StaticMesh;
-
-        return AssetType.Unknown;
+        return new SotrRawAssetData { Info = info, RawData = body, RawProperties = props };
     }
 
-    private static AssetType ClassifyAsset(byte[] data, out int ddsOffset)
+    private AssetData LoadArchiveFile(AssetInfo info, TigerEntry entry, TigerReader owner)
     {
-        ddsOffset = -1;
-        if (data.Length < 4) return AssetType.Unknown;
+        byte[] raw = _archives.ReadEntry(entry, owner);
 
-        uint magic = BitConverter.ToUInt32(data, 0);
-
-        // Raw DDS
-        if (magic == 0x20534444) { ddsOffset = 0; return AssetType.Texture; }
-
-        // Raw audio
-        if (magic == 0x46464952 || magic == 0x5367674F) return AssetType.Audio;
-
-        // DRM v23 wrapper
-        if (magic == 23)
+        var props = new Dictionary<string, object?>
         {
-            AssetType t = ClassifyDrm(data);
-            if (t == AssetType.Texture)
-            {
-                // Find the DDS by computing the exact section-data start offset
-                ddsOffset = FindDrmSectionDataOffset(data, sectionIndex: 0);
-                return AssetType.Texture;
-            }
-            if (t != AssetType.Unknown) return t;
+            ["Hash"]      = $"0x{entry.NameHash:X16}",
+            ["Archive"]   = Path.GetFileName(owner.IndexPath),
+            ["Tiger Part"] = entry.ArchivePart,
+            ["Offset"]    = $"0x{entry.Offset:X8}",
+            ["Locale"]    = DescribeLocale(entry.Locale),
+            ["_RawSize"]  = raw.Length,
+        };
+
+        var collection = SotrDrmReader.TryParse(raw);
+        if (collection != null)
+        {
+            props["DRM Version"]   = SotrDrmReader.DrmVersion;
+            props["Resources"]     = collection.Resources.Count;
+            props["Dependencies"]  = collection.Dependencies.Count;
+            props["Main Resource"] = collection.MainResourceIndex >= 0 &&
+                                     collection.MainResourceIndex < collection.Resources.Count
+                ? DescribeResource(collection.Resources[collection.MainResourceIndex])
+                : "(none)";
+
+            var byType = collection.Resources
+                .Where(r => r.Enabled)
+                .GroupBy(r => r.Type)
+                .OrderByDescending(g => g.Count());
+            foreach (var group in byType)
+                props[$"Contains[{group.Key}]"] = group.Count();
+
+            for (int i = 0; i < collection.Dependencies.Count && i < 64; i++)
+                props[$"Dependency[{i}]"] = collection.Dependencies[i];
         }
 
-        return AssetType.Unknown;
+        return new SotrRawAssetData { Info = info, RawData = raw, RawProperties = props };
     }
 
-    /// <summary>
-    /// Computes the byte offset at which section[sectionIndex]'s data begins
-    /// within a fully-decompressed DRM v23 buffer.
-    ///
-    /// DRM layout:
-    ///   [28-byte fixed header]
-    ///   [numObjects  × 4 bytes]
-    ///   [numRelocs   × 8 bytes]
-    ///   [numImports  × 8 bytes]
-    ///   [numSections × 20-byte section headers]
-    ///   [section data blocks — section[0].data | section[1].data | …]
-    ///
-    /// Each section's data is padded to its allocationSize (header field +8).
-    /// </summary>
-    private static int FindDrmSectionDataOffset(byte[] data, int sectionIndex)
+    // ── Asset data builders ───────────────────────────────────────────────────
+
+    private static TextureAssetData BuildTextureAsset(
+        AssetInfo info, SotrTextureReader texture, Dictionary<string, object?> props)
     {
-        if (data.Length < 28) return -1;
+        var mips = texture.SplitMips();
 
-        uint numObjects  = BitConverter.ToUInt32(data,  4);
-        uint numRelocs   = BitConverter.ToUInt32(data,  8);
-        uint numImports  = BitConverter.ToUInt32(data, 12);
-        uint numSections = BitConverter.ToUInt32(data, 16);
+        // When the engine streams the top levels from elsewhere, the largest level actually
+        // present is smaller than the texture's nominal size — report what we can decode.
+        int width  = mips.Count > 0 ? mips[0].Width  : texture.Width;
+        int height = mips.Count > 0 ? mips[0].Height : texture.Height;
 
-        if (numObjects > 65536 || numRelocs > 1_048_576 || numImports > 65536
-         || numSections == 0   || numSections > 128) return -1;
-        if (sectionIndex >= (int)numSections) return -1;
-
-        long firstSectionHeader = 28L + numObjects * 4 + numRelocs * 8 + numImports * 8;
-        long firstSectionData   = firstSectionHeader + numSections * 20;
-
-        // Sum allocationSize of every section that precedes sectionIndex
-        long dataOffset = firstSectionData;
-        for (int s = 0; s < sectionIndex; s++)
+        props["Width"]     = width;
+        props["Height"]    = height;
+        props["Format"]    = texture.FormatName;
+        props["MipCount"]  = mips.Count;
+        props["Cube Map"]  = texture.IsCubeMap;
+        props["sRGB"]      = texture.IsSrgb;
+        if (texture.HighResMipMapLevels > 0)
         {
-            long hdrOff    = firstSectionHeader + s * 20;
-            if (hdrOff + 12 > data.Length) return -1;
-            uint allocSize = BitConverter.ToUInt32(data, (int)(hdrOff + 8));
-            dataOffset += allocSize;
+            props["Nominal Size"]           = $"{texture.Width}x{texture.Height}";
+            props["Streamed High-Res Mips"] = texture.HighResMipMapLevels;
         }
 
-        if (dataOffset >= data.Length) return -1;
-
-        // Verify DDS magic at the computed offset (±16 bytes for alignment slop)
-        for (int delta = 0; delta <= 16; delta += 4)
+        var tex = new TextureAssetData
         {
-            long candidate = dataOffset + delta;
-            if (candidate + 4 > data.Length) break;
-            if (BitConverter.ToUInt32(data, (int)candidate) == 0x20534444)
-                return (int)candidate;
-        }
+            Info          = info,
+            Width         = width,
+            Height        = height,
+            SourceFormat  = texture.FormatName,
+            IsSrgb        = texture.IsSrgb,
+            RawProperties = props,
+        };
 
-        // DDS magic not at expected position — do a broader scan within this section's range
-        long secHdrOff = firstSectionHeader + sectionIndex * 20;
-        if (secHdrOff + 8 > data.Length) return -1;
-        uint dataSize = BitConverter.ToUInt32(data, (int)secHdrOff + 4);
-        long scanEnd  = Math.Min(dataOffset + dataSize, data.Length - 4);
-        for (long i = dataOffset; i <= scanEnd; i += 4)
-        {
-            if (BitConverter.ToUInt32(data, (int)i) == 0x20534444)
-                return (int)i;
-        }
+        foreach (var (mipWidth, mipHeight, data) in mips)
+            tex.Mips.Add(new MipData { Width = mipWidth, Height = mipHeight, Data = data });
 
-        return -1;
+        return tex;
     }
 
-    private static AssetType ClassifyDrm(byte[] data)
+    private static AudioAssetData BuildAudioAsset(
+        AssetInfo info, byte[] data, Dictionary<string, object?> props)
     {
-        if (data.Length < 28) return AssetType.Unknown;
+        // SOTTR ships Wwise sound banks; individual streams live inside the .bnk.
+        string format = data.Length >= 4 && data[0] == 'B' && data[1] == 'K' && data[2] == 'H' && data[3] == 'D'
+            ? "Wwise BNK"
+            : "Wwise";
 
-        uint numObjects  = BitConverter.ToUInt32(data,  4);
-        uint numRelocs   = BitConverter.ToUInt32(data,  8);
-        uint numImports  = BitConverter.ToUInt32(data, 12);
-        uint numSections = BitConverter.ToUInt32(data, 16);
+        props["AudioFormat"] = format;
 
-        if (numObjects > 65536 || numRelocs > 1_048_576 || numImports > 65536
-            || numSections == 0 || numSections > 128) return AssetType.Unknown;
-
-        long off = 28L + numObjects * 4 + numRelocs * 8 + numImports * 8;
-        if (off + 4 > data.Length) return AssetType.Unknown;
-
-        uint sectionType = BitConverter.ToUInt32(data, (int)off);
-        return sectionType switch
+        return new AudioAssetData
         {
-            1  => AssetType.Animation,
-            2  => AssetType.StaticMesh,
-            5  => AssetType.Texture,
-            13 => AssetType.Audio,
-            14 => AssetType.Audio,
-            _  => AssetType.Unknown
+            Info          = info,
+            RawAudioData  = data,
+            SourceFormat  = format,
+            RawProperties = props,
         };
     }
 
-    private static void AnnotateDrmProps(byte[] data, Dictionary<string, object?> props)
+    // ── Naming ────────────────────────────────────────────────────────────────
+
+    private AssetInfo ResourceToInfo(IndexedResource indexed)
     {
-        if (data.Length < 28) return;
+        var resource = indexed.Resource;
+        string path  = ResourceVirtualPath(indexed);
 
-        uint numObjects  = BitConverter.ToUInt32(data,  4);
-        uint numRelocs   = BitConverter.ToUInt32(data,  8);
-        uint numImports  = BitConverter.ToUInt32(data, 12);
-        uint numSections = BitConverter.ToUInt32(data, 16);
-
-        if (numObjects > 65536 || numRelocs > 1_048_576 || numImports > 65536 || numSections > 128) return;
-
-        props["DRM Version"]  = 23;
-        props["DRM Sections"] = numSections;
-        props["DRM Objects"]  = numObjects;
-        props["DRM Imports"]  = numImports;
-
-        long sectionOff = 28L + numObjects * 4 + numRelocs * 8 + numImports * 8;
-        for (int s = 0; s < (int)numSections && sectionOff + 20 <= data.Length; s++, sectionOff += 20)
+        // Name is extension-less by convention — exporters append their own.
+        return new AssetInfo
         {
-            uint sType    = BitConverter.ToUInt32(data, (int)sectionOff);
-            uint dataSize = BitConverter.ToUInt32(data, (int)sectionOff + 4);
-            props[$"Section[{s}]"] = $"{DrmSectionTypeName(sType)}  ({dataSize:N0} B)";
-        }
+            VirtualPath      = path,
+            Name             = Path.GetFileNameWithoutExtension(path),
+            Type             = MapAssetType(resource),
+            CompressedSize   = resource.Length,
+            UncompressedSize = resource.RefDefinitionsSize + resource.BodySize,
+            ArchivePath      = _archives.Find(resource.ArchiveId, resource.ArchiveSubId)?.IndexPath ?? string.Empty,
+            EngineClassName  = DescribeSubType(resource),
+            IsEncrypted      = false,
+        };
     }
 
-    private static string DrmSectionTypeName(uint t) => t switch
+    private AssetInfo FileToInfo(TigerEntry entry, TigerReader owner)
     {
-        0 => "Generic",   1 => "Animation",   2 => "RenderMesh",
-        3 => "Havok",     4 => "Script",      5 => "Texture",
-        6 => "Material",  7 => "Object",      8 => "CollisionMesh",
-        9 => "Dependent", 10 => "ScriptLib",  11 => "ShaderLib",
-        12 => "TRLang",   13 => "SoundFSB",   14 => "MusicFSB",
-        15 => "Blueprint", _ => $"Type{t}"
+        string path = FileVirtualPath(entry);
+        return new AssetInfo
+        {
+            VirtualPath      = path,
+            Name             = Path.GetFileNameWithoutExtension(path),
+            Type             = AssetType.Other,
+            CompressedSize   = entry.CompressedSize > 0 ? entry.CompressedSize : entry.UncompressedSize,
+            UncompressedSize = entry.UncompressedSize,
+            ArchivePath      = owner.IndexPath,
+            EngineClassName  = path.StartsWith("/collections/", StringComparison.Ordinal)
+                                   ? "ResourceCollection"
+                                   : "TigerFile",
+            IsEncrypted      = false,
+        };
+    }
+
+    private string ResourceVirtualPath(IndexedResource indexed)
+    {
+        var resource   = indexed.Resource;
+        string folder  = TypeFolder(resource);
+        string owner   = StripCollectionSuffix(ResolveName(indexed.CollectionHash));
+        string name    = $"{resource.Type}_{resource.Id}{LocaleSuffix(resource.Locale)}{Extension(resource)}";
+        return $"/{folder}/{owner}/{name}";
+    }
+
+    private string FileVirtualPath(TigerEntry entry)
+    {
+        string name   = ResolveName(entry.NameHash);
+        string suffix = LocaleSuffix(entry.Locale);
+
+        if (suffix.Length > 0)
+        {
+            string ext = Path.GetExtension(name);
+            name = name[..^ext.Length] + suffix + ext;
+        }
+
+        return name.EndsWith(".drm", StringComparison.OrdinalIgnoreCase)
+            ? $"/collections/{name}"
+            : $"/files/{name}";
+    }
+
+    /// <summary>
+    /// Filename tag distinguishing localised variants of the same asset. The same resource id
+    /// exists once per language, so without this every localisation collapses onto one path and
+    /// all but the last would be unreachable. Mirrors ShadowArchiveSet.MakeLocaleSuffix.
+    /// </summary>
+    private static string LocaleSuffix(ulong locale)
+    {
+        if (locale == ulong.MaxValue) return string.Empty;
+
+        uint text  = (uint)(locale & 0xFFFFFFF);
+        uint voice = (uint)((locale >> 28) & 0xFFFFFFF);
+        int  plat  = (int)(locale >> 56);
+
+        string textName  = text  == 0xFFFFFFF ? "alltxt" : LanguageName(text);
+        string voiceName = voice == 0xFFFFFFF ? "allvo"  : LanguageName(voice);
+        string platName  = plat switch { 0xFF => "allplt", 0x20 => "neutral", _ => $"{plat:X2}" };
+
+        return $"_{textName}_{voiceName}_{platName}";
+    }
+
+    private string ResolveName(ulong hash)
+    {
+        if (!_nameCache.TryGetValue(hash, out string? raw)) return $"unnamed/{hash:X16}";
+
+        if (raw.StartsWith(SotrDrmReader.PlatformPrefix, StringComparison.OrdinalIgnoreCase))
+            raw = raw[SotrDrmReader.PlatformPrefix.Length..];
+        return raw.Replace('\\', '/');
+    }
+
+    private static string StripCollectionSuffix(string path)
+        => path.EndsWith(".drm", StringComparison.OrdinalIgnoreCase) ? path[..^4] : path;
+
+    /// <summary>File extensions matching TrRebootModTools' ShadowResourceNaming.</summary>
+    private static string Extension(SotrResource r) => r.Type switch
+    {
+        SotrResourceType.Animation              => ".tr11anim",
+        SotrResourceType.AnimationLib           => ".tr11animlib",
+        SotrResourceType.CollisionModel         => ".tr11cmodel",
+        SotrResourceType.Dtp                    => ".tr11dtp",
+        SotrResourceType.GlobalContentReference => ".tr11contentref",
+        SotrResourceType.Material               => ".tr11material",
+        SotrResourceType.ObjectReference        => ".tr11objectref",
+        SotrResourceType.BlendShapeDriver       => ".tr11drivers",
+        SotrResourceType.Script                 => ".tr11script",
+        SotrResourceType.ShaderLib              => ".tr11shaderlib",
+        SotrResourceType.SoundBank              => ".bnk",
+        SotrResourceType.Texture                => ".dds",
+        SotrResourceType.Model => r.SubType switch
+        {
+            SotrResourceSubType.Model      => ".tr11model",
+            SotrResourceSubType.ModelData  => ".tr11modeldata",
+            SotrResourceSubType.ShResource => ".tr11shresource",
+            SotrResourceSubType.CubeLut    => ".tr11cubelut",
+            _                              => ".tr11model",
+        },
+        _ => ".bin",
     };
 
-    // ── Type cache ────────────────────────────────────────────────────────────
+    private static string TypeFolder(SotrResource r) => r.Type switch
+    {
+        SotrResourceType.Texture        => "textures",
+        SotrResourceType.Model          => "models",
+        SotrResourceType.Animation
+            or SotrResourceType.AnimationLib => "animations",
+        SotrResourceType.SoundBank      => "audio",
+        SotrResourceType.Material       => "materials",
+        SotrResourceType.CollisionModel => "collision",
+        SotrResourceType.Dtp            => "data",
+        SotrResourceType.LocalString    => "strings",
+        SotrResourceType.Script
+            or SotrResourceType.ShaderLib    => "scripts",
+        _ => "other",
+    };
 
-    private string TypeCachePath(string gameDir)
+    private static AssetType MapAssetType(SotrResource r) => r.Type switch
+    {
+        SotrResourceType.Texture      => AssetType.Texture,
+        SotrResourceType.Animation
+            or SotrResourceType.AnimationLib => AssetType.Animation,
+        SotrResourceType.SoundBank    => AssetType.Audio,
+        SotrResourceType.Material     => AssetType.Material,
+        SotrResourceType.Dtp          => AssetType.DataTable,
+        SotrResourceType.LocalString  => AssetType.StringTable,
+        SotrResourceType.Model        => r.SubType == SotrResourceSubType.ModelData
+                                            ? AssetType.StaticMesh
+                                            : AssetType.Other,
+        _ => AssetType.Other,
+    };
+
+    private static string DescribeSubType(SotrResource r) => r.SubType switch
+    {
+        SotrResourceSubType.Texture    => "Texture",
+        SotrResourceSubType.Model      => "Model",
+        SotrResourceSubType.ModelData  => "ModelData",
+        SotrResourceSubType.ShResource => "ShResource",
+        SotrResourceSubType.CubeLut    => "CubeLut",
+        0                              => r.Type.ToString(),
+        _                              => $"{r.Type}:{r.SubType}",
+    };
+
+    private static string DescribeResource(SotrResource r)
+        => $"{r.Type}:{r.Id}{(r.SubType != 0 ? $" ({DescribeSubType(r)})" : "")}";
+
+    // ── Locale ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Shadow packs three fields into the 64-bit locale: text language in bits 0-27,
+    /// voice language in bits 28-55, platform in bits 56-63.
+    /// </summary>
+    private static string DescribeLocale(ulong locale)
+    {
+        if (locale == ulong.MaxValue) return "all locales";
+        if (locale == 0)              return "none";
+        return LocaleSuffix(locale).TrimStart('_').Replace("_", " / ");
+    }
+
+    private static string LanguageName(uint flags) => flags switch
+    {
+        0x0001 => "en",    0x0002 => "fr",    0x0004 => "de",
+        0x0008 => "it",    0x0010 => "es",    0x0020 => "nl",
+        0x0040 => "pl",    0x0080 => "pt-br", 0x0100 => "ru",
+        0x0200 => "ja",    0x0400 => "ko",    0x0800 => "zh-tw",
+        0x1000 => "zh-cn", 0x2000 => "ar",    0      => "none",
+        _      => $"0x{flags:X}",
+    };
+
+    // ── Resource index cache ──────────────────────────────────────────────────
+
+    private const string CACHE_MAGIC   = "SOTRIDX1";
+    private const int    CACHE_VERSION = 1;
+
+    private string CachePath(string gameDir)
     {
         ulong key = CdcHash64(gameDir.ToLowerInvariant());
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        return Path.Combine(appData, "GameAssetExplorer", $"sotr-{key:X16}-types.bin");
+        return Path.Combine(appData, "GameAssetExplorer", $"sotr-{key:X16}-resources.bin");
     }
 
-    private void LoadTypeCache(string gameDir)
+    /// <summary>
+    /// Fingerprint of the mounted archive set. Any archive added, removed, patched or resized
+    /// changes this, which invalidates the cache rather than serving a stale index.
+    /// </summary>
+    private long ArchiveSignature()
+    {
+        long signature = _archives.Archives.Count;
+        foreach (var a in _archives.Archives.OrderBy(a => a.IndexPath, StringComparer.OrdinalIgnoreCase))
+        {
+            signature = signature * 31 + a.NumFiles;
+            try { signature = signature * 31 + new FileInfo(a.IndexPath).Length; } catch { }
+        }
+        return signature;
+    }
+
+    private bool LoadResourceCache(string gameDir)
     {
         try
         {
-            string path = TypeCachePath(gameDir);
-            if (!File.Exists(path)) return;
+            string path = CachePath(gameDir);
+            if (!File.Exists(path)) return false;
+
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
-            using var br = new BinaryReader(fs);
+            using var br = new BinaryReader(fs, Encoding.UTF8);
+
+            if (br.ReadString() != CACHE_MAGIC) return false;
+            if (br.ReadInt32()  != CACHE_VERSION) return false;
+            if (br.ReadInt64()  != ArchiveSignature()) return false;
+
             int count = br.ReadInt32();
+            if (count < 0 || count > 20_000_000) return false;
+
             for (int i = 0; i < count; i++)
             {
-                ulong hash = br.ReadUInt64();
-                var   type = (AssetType)br.ReadByte();
-                _typeMap[hash] = type;
+                var resource = new SotrResource
+                {
+                    Type               = (SotrResourceType)br.ReadByte(),
+                    SubType            = br.ReadInt32(),
+                    Id                 = br.ReadInt32(),
+                    Locale             = br.ReadUInt64(),
+                    BodySize           = br.ReadUInt32(),
+                    RefDefinitionsSize = br.ReadUInt32(),
+                    ArchiveId          = br.ReadByte(),
+                    ArchiveSubId       = br.ReadByte(),
+                    ArchivePart        = br.ReadInt16(),
+                    Offset             = br.ReadUInt32(),
+                    Length             = br.ReadUInt32(),
+                    Enabled            = true,
+                };
+                ulong collectionHash = br.ReadUInt64();
+
+                _resources.TryAdd(resource.Key, new IndexedResource
+                {
+                    Resource       = resource,
+                    CollectionHash = collectionHash,
+                });
             }
+
+            return _resources.Count > 0;
         }
-        catch { /* silently ignore corrupt cache */ }
+        catch
+        {
+            _resources.Clear();
+            return false;
+        }
     }
 
-    private void SaveTypeCache(string gameDir)
+    private void SaveResourceCache(string gameDir)
     {
-        if (string.IsNullOrEmpty(gameDir) || _typeMap.IsEmpty) return;
+        if (string.IsNullOrEmpty(gameDir) || _resources.IsEmpty) return;
+
         try
         {
-            string path = TypeCachePath(gameDir);
+            string path = CachePath(gameDir);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             string tmp = path + ".tmp";
+
             using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write))
-            using (var bw = new BinaryWriter(fs))
+            using (var bw = new BinaryWriter(fs, Encoding.UTF8))
             {
-                var entries = _typeMap.ToArray();
+                bw.Write(CACHE_MAGIC);
+                bw.Write(CACHE_VERSION);
+                bw.Write(ArchiveSignature());
+
+                var entries = _resources.Values.ToArray();
                 bw.Write(entries.Length);
-                foreach (var (hash, type) in entries)
+
+                foreach (var indexed in entries)
                 {
-                    bw.Write(hash);
-                    bw.Write((byte)type);
+                    var r = indexed.Resource;
+                    bw.Write((byte)r.Type);
+                    bw.Write(r.SubType);
+                    bw.Write(r.Id);
+                    bw.Write(r.Locale);
+                    bw.Write(r.BodySize);
+                    bw.Write(r.RefDefinitionsSize);
+                    bw.Write((byte)r.ArchiveId);
+                    bw.Write((byte)r.ArchiveSubId);
+                    bw.Write((short)r.ArchivePart);
+                    bw.Write(r.Offset);
+                    bw.Write(r.Length);
+                    bw.Write(indexed.CollectionHash);
                 }
             }
+
             File.Move(tmp, path, overwrite: true);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[SOTR] Could not save type cache: {ex.Message}");
+            Console.WriteLine($"[SOTR] Could not save resource cache: {ex.Message}");
         }
     }
 
     // ── Hash list ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Loads the 335K-path list bundled as an embedded resource.
-    /// Hash function: FNV-64 applied directly to the path string chars (UTF-16),
-    /// no lowercasing, no slash conversion — matches ShadowHash.Calculate64 exactly.
+    /// Loads the 335K-path list bundled as an embedded resource. The hash is FNV-1 64 over the
+    /// path's UTF-16 chars with no lowercasing and no slash conversion — the paths must be
+    /// hashed exactly as written, matching ShadowHash.Calculate64.
     /// </summary>
     private void LoadBundledHashList()
     {
-        var asm    = Assembly.GetExecutingAssembly();
+        var asm = Assembly.GetExecutingAssembly();
         const string res = "GameAssetExplorer.SotrEngine.SOTR_PC_Release.list";
+
         using var stream = asm.GetManifestResourceStream(res);
         if (stream == null)
         {
@@ -591,203 +803,21 @@ public class SotrEnginePlugin : IGameEngine
             return;
         }
 
-        using var reader = new System.IO.StreamReader(stream, System.Text.Encoding.UTF8);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
         string? line;
         while ((line = reader.ReadLine()) != null)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
-            ulong hash = CdcHash64(line);
-            _nameCache[hash] = line;
+            _nameCache[CdcHash64(line)] = line;
         }
     }
 
-    /// <summary>
-    /// FNV-1 64-bit — matches arcusmaximus ShadowHash.Calculate64 exactly.
-    /// Applied to UTF-16 chars, no normalization.
-    /// </summary>
     private static ulong CdcHash64(string str)
     {
         ulong hash = 0xCBF29CE484222325;
         foreach (char c in str)
             hash = (hash ^ c) * 0x100000001B3;
         return hash;
-    }
-
-    // ── Virtual path building ─────────────────────────────────────────────────
-
-    private string MakeVirtualPath(TigerEntry entry)
-    {
-        string type  = TypeFolder(entry.NameHash);
-        string name  = ResolveName(entry.NameHash);
-        return $"/{type}/{name}";
-    }
-
-    private string TypeFolder(ulong hash)
-    {
-        if (!_typeMap.TryGetValue(hash, out var t)) t = AssetType.Unknown;
-        return t switch
-        {
-            AssetType.Texture      => "textures",
-            AssetType.StaticMesh
-            or AssetType.SkeletalMesh => "models",
-            AssetType.Audio        => "audio",
-            AssetType.Animation    => "animations",
-            AssetType.Level        => "levels",
-            _                      => "other"
-        };
-    }
-
-    private string ResolveName(ulong hash)
-    {
-        if (!_nameCache.TryGetValue(hash, out string? raw)) return $"{hash:X16}";
-
-        // Strip "pcx64-w\" platform prefix, normalize to forward slashes
-        if (raw.StartsWith("pcx64-w\\", StringComparison.OrdinalIgnoreCase))
-            raw = raw["pcx64-w\\".Length..];
-        return raw.Replace('\\', '/');
-    }
-
-    // ── AssetInfo builder ─────────────────────────────────────────────────────
-
-    private AssetInfo EntryToInfo(TigerEntry entry, int readerId)
-    {
-        _typeMap.TryGetValue(entry.NameHash, out var type);
-        bool resolved = _nameCache.ContainsKey(entry.NameHash);
-
-        return new AssetInfo
-        {
-            VirtualPath      = MakeVirtualPath(entry),
-            Name             = resolved
-                                   ? Path.GetFileName(ResolveName(entry.NameHash))
-                                   : $"{entry.NameHash:X16}",
-            Type             = type,
-            CompressedSize   = entry.CompressedSize > 0 ? entry.CompressedSize : entry.DecompressedSize,
-            UncompressedSize = entry.DecompressedSize,
-            ArchivePath      = _readers[readerId].IndexPath,
-            EngineClassName  = "TigerEntry",
-            IsEncrypted      = false,
-        };
-    }
-
-    private static Dictionary<string, object?> BuildBaseProps(TigerEntry entry, TigerReader reader)
-        => new()
-        {
-            ["Hash"]      = $"0x{entry.NameHash:X16}",
-            ["Archive"]   = Path.GetFileName(reader.IndexPath),
-            ["TigerPart"] = entry.TigerPart,
-            ["Offset"]    = $"0x{entry.Offset:X8}",
-            ["Locale"]    = DescribeLocale(entry.Locale),
-            ["Priority"]  = entry.Priority,
-        };
-
-    // ── Locale ────────────────────────────────────────────────────────────────
-
-    private static string DescribeLocale(ulong locale)
-    {
-        if (locale == 0)           return "common (language-independent)";
-        if (locale == ulong.MaxValue) return "all locales";
-        if ((locale & (locale - 1)) == 0) return SingleLocaleName(locale);
-        return $"multi-locale (0x{locale:X16})";
-    }
-
-    private static string SingleLocaleName(ulong locale) => locale switch
-    {
-        0x0001 => "en",   0x0002 => "fr",    0x0004 => "de",
-        0x0008 => "it",   0x0010 => "es",    0x0020 => "nl",
-        0x0040 => "pl",   0x0080 => "pt-br", 0x0100 => "ru",
-        0x0200 => "ja",   0x0400 => "ko",    0x0800 => "zh-tw",
-        0x1000 => "zh-cn",0x2000 => "ar",    _ => $"locale-{locale:X}"
-    };
-
-    // ── Asset data builders ───────────────────────────────────────────────────
-
-    private static TextureAssetData BuildTextureAsset(
-        AssetInfo info, byte[] data, int ddsStart, Dictionary<string, object?> props)
-    {
-        var tex = new TextureAssetData { Info = info };
-        var dds = data.AsSpan(ddsStart).ToArray();
-
-        if (dds.Length >= 128 && dds[0] == 'D' && dds[1] == 'D' && dds[2] == 'S' && dds[3] == ' ')
-        {
-            tex.Height = (int)BitConverter.ToUInt32(dds, 12);
-            tex.Width  = (int)BitConverter.ToUInt32(dds, 16);
-            int mipCount = (int)BitConverter.ToUInt32(dds, 28);
-            uint fourCC  = BitConverter.ToUInt32(dds, 84);
-            tex.SourceFormat = fourCC switch
-            {
-                0x31545844 => "DXT1", 0x33545844 => "DXT3", 0x35545844 => "DXT5",
-                0x30315844 => ReadDx10Format(dds), 0 => "RGBA",
-                _ => $"FourCC:0x{fourCC:X8}"
-            };
-            tex.IsSrgb = tex.SourceFormat is "DXT1" or "DXT5" or "BC1" or "BC3" or "BC7";
-            tex.Mips.Add(new MipData
-            {
-                Width = tex.Width, Height = tex.Height,
-                Data = dds.Length > 128 ? dds[128..] : Array.Empty<byte>(),
-            });
-            props["Width"]    = tex.Width;
-            props["Height"]   = tex.Height;
-            props["Format"]   = tex.SourceFormat;
-            props["MipCount"] = mipCount;
-            if (ddsStart > 0) props["DrmHeaderBytes"] = ddsStart;
-        }
-
-        tex.RawProperties = props;
-        return tex;
-    }
-
-    private static AudioAssetData BuildAudioAsset(
-        AssetInfo info, byte[] data, Dictionary<string, object?> props)
-    {
-        var audio = new AudioAssetData { Info = info, RawAudioData = data };
-        uint magic = data.Length >= 4 ? BitConverter.ToUInt32(data, 0) : 0;
-        if (magic == 0x46464952 && data.Length >= 44)
-        {
-            audio.SourceFormat = "WAV";
-            if (data[12] == 'f' && data[13] == 'm' && data[14] == 't')
-            {
-                audio.Channels   = BitConverter.ToUInt16(data, 22);
-                audio.SampleRate = (int)BitConverter.ToUInt32(data, 24);
-            }
-        }
-        else
-        {
-            audio.SourceFormat = "OGG";
-        }
-        audio.RawProperties = props;
-        props["AudioFormat"] = audio.SourceFormat;
-        props["SampleRate"]  = audio.SampleRate > 0 ? audio.SampleRate : (object?)"unknown";
-        props["Channels"]    = audio.Channels   > 0 ? audio.Channels   : (object?)"unknown";
-        return audio;
-    }
-
-    private static string ReadDx10Format(byte[] dds)
-    {
-        if (dds.Length < 132) return "DX10";
-        uint dxgi = BitConverter.ToUInt32(dds, 128);
-        return dxgi switch
-        {
-            71 => "BC1", 74 => "BC2", 77 => "BC3", 80 => "BC4",
-            83 => "BC5", 95 => "BC6H", 98 => "BC7", 87 => "BGRA8", 28 => "RGBA8",
-            _ => $"DXGI:{dxgi}"
-        };
-    }
-
-    // ── Archive slug ─────────────────────────────────────────────────────────
-
-    private static string ArchiveSlug(string indexPath)
-    {
-        string stem = Path.GetFileNameWithoutExtension(indexPath);
-        if (stem.EndsWith(".000", StringComparison.Ordinal)) stem = stem[..^4];
-        if (stem.Length > 4 && stem[^4] == '.' && stem[^3..].All(char.IsAsciiDigit))
-            stem = stem[..^4];
-        if (stem.Equals("bigfile", StringComparison.OrdinalIgnoreCase)) return "base";
-        if (stem.StartsWith("bigfile.update", StringComparison.OrdinalIgnoreCase))
-            return "update-" + stem["bigfile.update".Length..];
-        if (stem.StartsWith("bigfile.dlc.", StringComparison.OrdinalIgnoreCase))
-            return "dlc-" + stem["bigfile.dlc.".Length..].Replace('.', '-');
-        int dot = stem.IndexOf('.');
-        return dot >= 0 ? stem[(dot + 1)..].Replace('.', '-') : stem;
     }
 
     // ── Directory walk ────────────────────────────────────────────────────────
@@ -802,15 +832,24 @@ public class SotrEnginePlugin : IGameEngine
             IEnumerable<string> files = Enumerable.Empty<string>();
             try { files = Directory.EnumerateFiles(dir, pattern); } catch { }
             foreach (var f in files) yield return f;
+
             IEnumerable<string> subs = Enumerable.Empty<string>();
             try { subs = Directory.EnumerateDirectories(dir); } catch { }
             foreach (var s in subs) queue.Enqueue(s);
         }
     }
+
+    // ── Index entry ───────────────────────────────────────────────────────────
+
+    private sealed class IndexedResource
+    {
+        public SotrResource Resource       { get; init; } = null!;
+        /// <summary>Path hash of the .drm that referenced this resource — used for naming.</summary>
+        public ulong        CollectionHash { get; init; }
+    }
 }
 
-/// <summary>Raw tiger entry for formats not yet fully decoded (materials, scripts, etc.)</summary>
-public class SotrRawAssetData : AssetData
+/// <summary>Raw resource bytes for types that have no dedicated decoder yet.</summary>
+public class SotrRawAssetData : RawAssetData
 {
-    public byte[] RawData { get; set; } = Array.Empty<byte>();
 }

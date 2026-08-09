@@ -46,6 +46,16 @@ public abstract class AssetData
     public Dictionary<string, object?> RawProperties { get; set; } = new();
 }
 
+/// <summary>
+/// An asset whose format has no dedicated decoder yet, carrying the raw bytes as they came
+/// out of the archive. Engine plugins derive from this so the exporter can write any asset
+/// to disk byte-for-byte without knowing which engine produced it.
+/// </summary>
+public abstract class RawAssetData : AssetData
+{
+    public byte[] RawData { get; set; } = Array.Empty<byte>();
+}
+
 /// <summary>Loaded texture asset with decoded pixel data</summary>
 public class TextureAssetData : AssetData
 {

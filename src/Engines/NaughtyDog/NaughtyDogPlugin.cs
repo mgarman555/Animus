@@ -676,7 +676,6 @@ public sealed class NdPakEntry
 }
 
 /// <summary>Raw asset data for Naughty Dog formats we can't yet decode further.</summary>
-public class NdRawAssetData : AssetData
+public class NdRawAssetData : RawAssetData
 {
-    public byte[] RawData { get; set; } = Array.Empty<byte>();
 }
