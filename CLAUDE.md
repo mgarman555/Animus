@@ -166,8 +166,15 @@ Each submesh resolves its own material+textures via the `m_material` fixup point
 ## Shadow of the Tomb Raider (Foundation Engine) — Key Facts
 
 Reverse-engineered against **arcusmaximus/TrRebootModTools** (MIT) and cross-checked with
-`cdcengine.re`. Byte-level logic re-verified in `tools/sotr_format_check.py` (run it — it tests the
-CDRM path against real zlib, plus every struct offset below).
+`cdcengine.re`.
+
+Two tools back this up, both stdlib-only Python:
+- `tools/sotr_format_check.py` — offline self-check. Tests the CDRM path against real zlib plus
+  every struct offset below. Needs no game files.
+- `tools/sotr_probe.py` — **run this against the real install.** It is a transcription of the C# in
+  `src/Engines/SotrEngine/`, so a failure there is a failure in the plugin, and its report names the
+  layer that broke. It also extracts sample `.dds` and `.obj` so the decode can be eyeballed:
+  `python tools\sotr_probe.py "C:\Users\madie\Documents\Shadow of the Tomb Raider" --extract out_sotr`
 
 ### The thing to internalise: `.drm` is a MANIFEST, not a container
 `.tiger` archives hold *files* (FNV-1 64 hash → bytes). Nearly all are `.drm`, and a `.drm` holds
@@ -256,4 +263,4 @@ All of these still export as raw bytes.
 | Installed UE4 games | Jedi Fallen Order, Jedi Survivor (encrypted) |
 | Installed UE5 games | Fortnite (encrypted), Hellblade |
 | Installed RAGE games | GTA5, Red Dead Redemption 2 |
-| Shadow of the Tomb Raider install | `bigfile.000.tiger` + parts — needed to validate the SOTR plugin (never yet run against real data) |
+| `Documents\Shadow of the Tomb Raider` | SOTR install — `bigfile.000.tiger` + parts. Validate with `python tools\sotr_probe.py "C:\Users\madie\Documents\Shadow of the Tomb Raider" --extract out_sotr` |
