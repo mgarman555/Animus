@@ -88,6 +88,26 @@ src/
 - NaughtyDog per-submesh textures: plugin resolves each submesh's diffuse to full-res via `texturedict3`;
   `SkeletalMeshViewerWindow` decodes + paints each submesh its own `ImageBrush` (PNG-verified; GUI eyeball pending)
 - Mesh-level diffuse: VRAM_DESC scan + full-res `texturedict3` hash lookup + BCnEncoder decode + ImageBrush
+- Character export from the 3D viewer (`SkeletalMeshViewerWindow`): four buttons — Geometry / Textures /
+  Armature / Export All — driven by `App/Services/CharacterExporter.cs`. Exports the **currently-selected LOD**
+  into a normalized `{chosen}/{Character}/` folder: model (glTF/OBJ/FBX per `ExportSettings`), `Textures/*.png`
+  (re-encoded from the viewport-decoded bitmaps so they match on-screen exactly), a skeleton JSON sidecar, and a
+  `_meta.json`. "Geometry" omits the skeleton; "Export All" embeds it. `GltfModelExporter` now honours
+  `ExportSettings.ExportSkeleton`. Armature button is disabled when a mesh has no parsed skeleton (all TLOU2
+  Ellie character/clothing paks — `JOINT_HIERARCHY` is detected by `NdPakReader` but not yet parsed into
+  `SkeletonData` for the Ellie paks specifically — see next bullet).
+- NaughtyDog skeleton (`NdJointHierarchyParser`): parses `JOINT_HIERARCHY` into `SkeletonData`, ported
+  from alphaZomega's `fmt_nd_pak.py` + `nd_pak.bt` (github.com/alphazolam). `_JOINT_HIERARCHY` header
+  from the resource base: `nodeCount@+20`, `matsOffset@+32` (→transforms), `namesOffset@+56`. Names =
+  nodeCount × 16B `{u64 hash, u64 ptr→ASCII}`; transforms = 48B `{scale[4], quat[4] xyzw, pos[4]}` with
+  **local** translation; parents = 16B `boneParentInfo {groupID, parentID, childID, chainID}` (parentID
+  @+4). The two sub-offsets the refs leave fuzzy (transform-array start inside the mats block; parent
+  array location) are found by signature — unit-length quaternions, and a valid 16B-stride parent tree.
+  Accepted only if names are joint-like ASCII AND parents form a valid acyclic tree of length nodeCount
+  (else null — no bogus skeleton). Populates `mesh.Skeleton` in `NaughtyDogPlugin.LoadAssetAsync`, which
+  auto-enables the viewer's Armature toggle + export. **Not yet run against a real `joint=True` pak**
+  (Ellie character paks are joint-less; joints live in sibling `-base.pak` files) — verify on Windows via
+  the `NdJoint[…]` log.
 
 ### In Progress
 - **Multi-game UI shell + Codex/FModel hybrid** — see `design/ui-mockup.html`. `AssetBrowserView` is single-game;
@@ -96,6 +116,10 @@ src/
   decode in the viewer forces skip-untile for that reason)
 
 ### Planned
+- **Verify ND skeleton parsing on Windows** — run `NdJointHierarchyParser` against a real base-skeleton
+  (`joint=True`) pak, confirm the discovered name/parent/transform arrays in the `NdJoint[…]` log, and fix the
+  bind-pose translation layout if bones look wrong. Then associate a character pak with its sibling
+  base-skeleton pak so Ellie (joint-less) meshes get a skeleton too.
 - FBX model export (CUE4Parse-Conversion)
 - Audio playback with waveform (NAudio)
 - Animation viewer with timeline scrubber

@@ -385,6 +385,20 @@ public class NaughtyDogPlugin : IGameEngine
                 foreach (var (k, v) in NdPakMeshParser.ParseMetadata(rawData))
                     mesh.RawProperties.TryAdd(k, v);
 
+                // Skeleton: parse JOINT_HIERARCHY into SkeletonData when the pak carries one
+                // (base-skeleton paks; character/clothing paks are joint-less). Populating this
+                // lights up the viewer's Armature toggle + export automatically.
+                if (reader?.JointEntry != null)
+                {
+                    var skel = NdJointHierarchyParser.TryParse(reader, asset.Name);
+                    if (skel is { Bones.Count: > 0 })
+                    {
+                        mesh.Skeleton   = skel;
+                        mesh.IsSkeletal = true;
+                        mesh.RawProperties["Skeleton"] = $"{skel.Bones.Count} bones (JOINT_HIERARCHY)";
+                    }
+                }
+
                 // If the dict is still building, give it up to 5 s before proceeding
                 if (!_texDict.IsLoaded && _texDictBuildTask != null)
                     await Task.WhenAny(_texDictBuildTask, Task.Delay(5000)).ConfigureAwait(false);

@@ -141,7 +141,9 @@ public class GltfModelExporter : IExporter
         }
 
         scene.RootNode.Children.Add(meshNode);
-        if (mesh.Skeleton is { Bones.Count: > 0 } skel)
+        // Skeleton rides along only when the caller wants it — the viewer's "Geometry" button
+        // clears ExportSkeleton for a mesh-only file, "All" leaves it on for a skinned character.
+        if (settings.ExportSkeleton && mesh.Skeleton is { Bones.Count: > 0 } skel)
             scene.RootNode.Children.Add(BuildSkeleton(skel, scale, convert));
         return scene;
     }
