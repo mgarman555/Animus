@@ -117,15 +117,26 @@ public partial class AssetBrowserViewModel : ObservableObject
         if (engine is SotrEnginePlugin sotr)
         {
             sotr.SetBackgroundProgress(new Progress<string>(msg => StatusMessage = msg));
-            sotr.TypeScanCompleted += async (_, _) =>
-            {
-                // Rebuild tree on UI thread so type folders populate correctly
-                var assets = await engine.GetAllAssetsAsync();
-                _allAssets = assets;
-                BuildFileTree(assets);
-                BuildAssetGroups(assets);
-                StatusMessage = $"{assets.Count:N0} assets — type scan complete.";
-            };
+
+            // The event is raised on the indexer's pool thread, and GetAllAssetsAsync completes
+            // synchronously, so an async-void handler would run this whole body off the UI
+            // thread and mutate view-model state from there. Marshal it explicitly.
+            sotr.TypeScanCompleted += (_, _) =>
+                System.Windows.Application.Current?.Dispatcher.InvokeAsync(async () =>
+                {
+                    try
+                    {
+                        var assets = await engine.GetAllAssetsAsync();
+                        _allAssets = assets;
+                        BuildFileTree(assets);
+                        BuildAssetGroups(assets);
+                        StatusMessage = $"{assets.Count:N0} assets — resource index complete.";
+                    }
+                    catch (Exception ex)
+                    {
+                        StatusMessage = $"Tree rebuild failed: {ex.Message}";
+                    }
+                });
         }
     }
 
@@ -407,7 +418,12 @@ public partial class AssetBrowserViewModel : ObservableObject
             switch (asset)
             {
                 case TextureAssetData:
-                    exportTasks.Add(new PngTextureExporter()
+                    // DDS keeps the original block-compressed surface and its mips, which is the
+                    // only lossless option for formats BCnEncoder can't decode to PNG (R8, R8G8, BC6H).
+                    IExporter textureExporter = flat.TextureFormat == TextureExportFormat.Dds
+                        ? new DdsTextureExporter()
+                        : new PngTextureExporter();
+                    exportTasks.Add(textureExporter
                         .ExportAsync(asset, Path.Combine(assetDir, "Textures"), flat));
                     break;
 
@@ -423,6 +439,12 @@ public partial class AssetBrowserViewModel : ObservableObject
 
                 case AudioAssetData audio:
                     exportTasks.Add(WriteRawAudioAsync(audio, assetDir));
+                    break;
+
+                // Materials, scripts, data tables, animations — anything without a decoder yet
+                // still gets its bytes written out, so nothing in the game is unexportable.
+                case RawAssetData raw:
+                    exportTasks.Add(WriteRawAssetAsync(raw, assetDir));
                     break;
             }
 
@@ -491,11 +513,24 @@ public partial class AssetBrowserViewModel : ObservableObject
         if (data == null || data.Length == 0) return;
         string ext = (audio.SourceFormat ?? "").ToLowerInvariant() switch
         {
-            var f when f.Contains("ogg") => ".ogg",
-            var f when f.Contains("wav") => ".wav",
+            var f when f.Contains("ogg")   => ".ogg",
+            var f when f.Contains("wav")   => ".wav",
+            var f when f.Contains("wwise") => ".bnk",
             _ => ".bin"
         };
         await File.WriteAllBytesAsync(Path.Combine(assetDir, NormalizePart(audio.Info.Name) + ext), data);
+    }
+
+    private static async Task WriteRawAssetAsync(RawAssetData raw, string assetDir)
+    {
+        var data = raw.RawData;
+        if (data == null || data.Length == 0) return;
+
+        // The virtual path carries the engine's own extension (.tr11material, .drm, …).
+        string ext = Path.GetExtension(raw.Info.VirtualPath);
+        if (string.IsNullOrEmpty(ext)) ext = ".bin";
+
+        await File.WriteAllBytesAsync(Path.Combine(assetDir, NormalizePart(raw.Info.Name) + ext), data);
     }
 
     private void BuildAssetGroups(IReadOnlyList<AssetInfo> assets) => AssetGroups = BuildAssetGroupsCore(assets);

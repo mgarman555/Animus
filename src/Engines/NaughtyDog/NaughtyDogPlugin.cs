@@ -509,6 +509,7 @@ public class NaughtyDogPlugin : IGameEngine
             tex.Width  = (int)BitConverter.ToUInt32(ddsData, 16);
 
             uint fourCC = BitConverter.ToUInt32(ddsData, 84);
+            bool isDx10 = fourCC == 0x30315844;
             tex.SourceFormat = fourCC switch
             {
                 0x31545844 => "DXT1",
@@ -518,13 +519,17 @@ public class NaughtyDogPlugin : IGameEngine
                 0           => "RGBA",
                 _           => $"FourCC:0x{fourCC:X8}"
             };
+            if (isDx10 && ddsData.Length >= 132)
+                tex.SourceDxgiFormat = BitConverter.ToUInt32(ddsData, 128);
 
-            // Raw DDS data (minus the 128-byte header) as mip 0
+            // A DX10 file carries a further 20-byte header before the surface; slicing at 128
+            // would prepend those bytes to the pixel data and shift the whole image.
+            int dataOffset = isDx10 ? 148 : 128;
             tex.Mips.Add(new MipData
             {
                 Width  = tex.Width,
                 Height = tex.Height,
-                Data   = ddsData.Length > 128 ? ddsData[128..] : Array.Empty<byte>()
+                Data   = ddsData.Length > dataOffset ? ddsData[dataOffset..] : Array.Empty<byte>()
             });
         }
 
@@ -540,8 +545,8 @@ public class NaughtyDogPlugin : IGameEngine
 
     private static string ReadDx10Format(byte[] dds)
     {
-        // DX10 header starts at byte 148 (after standard 128-byte header + 20-byte DX10 extension)
-        if (dds.Length < 132) return "DX10";
+        // The DX10 extension sits at 128..147; the surface itself starts at 148.
+        if (dds.Length < 148) return "DX10";
         uint dxgiFormat = BitConverter.ToUInt32(dds, 128);
         return dxgiFormat switch
         {
@@ -676,7 +681,6 @@ public sealed class NdPakEntry
 }
 
 /// <summary>Raw asset data for Naughty Dog formats we can't yet decode further.</summary>
-public class NdRawAssetData : AssetData
+public class NdRawAssetData : RawAssetData
 {
-    public byte[] RawData { get; set; } = Array.Empty<byte>();
 }
