@@ -2,6 +2,7 @@ using Assimp;
 using GameAssetExplorer.Core.Animation;
 using GameAssetExplorer.Core.Interfaces;
 using GameAssetExplorer.Core.Models;
+using GameAssetExplorer.Core.Utilities;
 using GameAssetExplorer.Core.Services;
 using AiMesh = Assimp.Mesh;
 using AiMaterial = Assimp.Material;
@@ -142,7 +143,6 @@ public class GltfModelExporter : IExporter
             }
             if (hasUv) aiMesh.UVComponentCount[0] = 2;
 
-            var normals = new Vector3D[aiMesh.VertexCount];
             int end = sub.IndexStart + sub.IndexCount;
             for (int i = sub.IndexStart; i + 2 < end && i + 2 < ni; i += 3)
             {
@@ -151,11 +151,26 @@ public class GltfModelExporter : IExporter
                 int c = BitConverter.ToInt32(ib!, (i + 2) * 4) - sub.VertexStart;
                 if ((uint)a >= (uint)aiMesh.VertexCount || (uint)b >= (uint)aiMesh.VertexCount || (uint)c >= (uint)aiMesh.VertexCount) continue;
                 aiMesh.Faces.Add(new Face(new[] { a, b, c }));
-                var fn = Cross(Sub(aiMesh.Vertices[b], aiMesh.Vertices[a]), Sub(aiMesh.Vertices[c], aiMesh.Vertices[a]));
-                normals[a] = Add(normals[a], fn); normals[b] = Add(normals[b], fn); normals[c] = Add(normals[c], fn);
             }
             if (aiMesh.FaceCount == 0) continue;
-            foreach (var n in normals) aiMesh.Normals.Add(Normalize(n));
+
+            // Normals from the LOD's shared buffer (MeshNormals), so exported shading matches
+            // what the viewport showed. They are authored in native space and carried into
+            // export space with TransformNormal, which applies the rotation/scale of xf but not
+            // its translation — a direction must not be displaced the way a point is. The
+            // export transform is a uniform scale plus an orthogonal axis swap, so normalising
+            // afterwards recovers a unit normal.
+            var sharedN = MeshNormals.EnsureComputed(lod);
+            for (int i = 0; i < aiMesh.VertexCount; i++)
+            {
+                int o = (sub.VertexStart + i) * 12;
+                if (sharedN == null || o + 12 > sharedN.Length) { aiMesh.Normals.Add(new Vector3D(0, 0, 0)); continue; }
+                var n = NumVector3.TransformNormal(new NumVector3(
+                    BitConverter.ToSingle(sharedN, o),
+                    BitConverter.ToSingle(sharedN, o + 4),
+                    BitConverter.ToSingle(sharedN, o + 8)), xf);
+                aiMesh.Normals.Add(Normalize(new Vector3D(n.X, n.Y, n.Z)));
+            }
 
             meshNode.MeshIndices.Add(scene.MeshCount);
             scene.Meshes.Add(aiMesh);

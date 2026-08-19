@@ -1,6 +1,7 @@
 using BCnEncoder.Decoder;
 using BCnEncoder.Shared;
 using GameAssetExplorer.Core.Models;
+using GameAssetExplorer.Core.Utilities;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -244,7 +245,9 @@ public partial class SkeletalMeshViewerWindow : Window
             indices.Add(localIdx);
         }
 
-        var normals = ComputeNormals(positions, indices);
+        // Normals come from the LOD's shared buffer (computed once for the whole LOD) so the
+        // viewer, glTF and FBX all shade from identical data. Sliced to this submesh's range.
+        var normals = SliceNormals(lod, sm, positions, indices);
 
         // UVs (if parsed): pull the same vertex range out of the merged UV buffer
         PointCollection? uvs = null;
@@ -855,32 +858,54 @@ public partial class SkeletalMeshViewerWindow : Window
         catch { return false; }
     }
 
-    private static Vector3DCollection ComputeNormals(Point3DCollection positions, Int32Collection indices)
+    /// <summary>
+    /// This submesh's slice of the LOD's shared normal buffer. Falls back to computing from the
+    /// submesh's own triangles when the LOD has no geometry buffers to derive from (the OBJ
+    /// fallback path builds geometry directly).
+    /// </summary>
+    private static Vector3DCollection SliceNormals(
+        LodData lod, SubmeshInfo sm, Point3DCollection positions, Int32Collection indices)
     {
-        int vCount = positions.Count;
-        var acc = new Vector3D[vCount];
+        var shared = MeshNormals.EnsureComputed(lod);
+        var result = new Vector3DCollection(positions.Count);
 
-        for (int t = 0; t < indices.Count; t += 3)
+        if (shared != null)
         {
-            int i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
-            if (i0 >= vCount || i1 >= vCount || i2 >= vCount) continue;
-
-            var p0 = positions[i0];
-            var e1 = positions[i1] - p0;
-            var e2 = positions[i2] - p0;
-            var fn = Vector3D.CrossProduct(e1, e2);
-
-            acc[i0] += fn; acc[i1] += fn; acc[i2] += fn;
+            bool ok = true;
+            for (int i = 0; i < positions.Count; i++)
+            {
+                int o = (sm.VertexStart + i) * 12;
+                if (o + 12 > shared.Length) { ok = false; break; }
+                result.Add(new Vector3D(
+                    BitConverter.ToSingle(shared, o),
+                    BitConverter.ToSingle(shared, o + 4),
+                    BitConverter.ToSingle(shared, o + 8)));
+            }
+            if (ok && result.Count == positions.Count) return result;
+            result = new Vector3DCollection(positions.Count);
         }
 
-        var normals = new Vector3DCollection(vCount);
-        for (int i = 0; i < vCount; i++)
+        var pos = new byte[positions.Count * 12];
+        for (int i = 0; i < positions.Count; i++)
         {
-            var n = acc[i];
-            if (n.LengthSquared > 0) n.Normalize();
-            normals.Add(n);
+            int o = i * 12;
+            BitConverter.TryWriteBytes(pos.AsSpan(o,     4), (float)positions[i].X);
+            BitConverter.TryWriteBytes(pos.AsSpan(o + 4, 4), (float)positions[i].Y);
+            BitConverter.TryWriteBytes(pos.AsSpan(o + 8, 4), (float)positions[i].Z);
         }
-        return normals;
+        var idx = new int[indices.Count];
+        indices.CopyTo(idx, 0);
+
+        var computed = MeshNormals.ComputeSmooth(pos, positions.Count, idx);
+        for (int i = 0; i < positions.Count; i++)
+        {
+            int o = i * 12;
+            result.Add(new Vector3D(
+                BitConverter.ToSingle(computed, o),
+                BitConverter.ToSingle(computed, o + 4),
+                BitConverter.ToSingle(computed, o + 8)));
+        }
+        return result;
     }
 
     private ImageBrush? TryDecodeMeshTexture(MeshAssetData meshData)

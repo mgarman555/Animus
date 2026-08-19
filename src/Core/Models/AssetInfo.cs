@@ -164,6 +164,14 @@ public class LodData
     public byte[]? UvBuffer { get; set; }
 
     /// <summary>
+    /// Smooth vertex normals, float32 XYZ (12 bytes/vertex), parallel to
+    /// <see cref="VertexBuffer"/> and in the same space. Derived from the triangles rather than
+    /// decoded, and computed on demand by <c>MeshNormals.EnsureComputed</c> — the viewer and
+    /// every exporter share this one buffer instead of each deriving its own.
+    /// </summary>
+    public byte[]? NormalBuffer { get; set; }
+
+    /// <summary>
     /// Original submesh boundaries within the merged buffers.
     /// Empty list = treat the whole LOD as a single unnamed submesh.
     /// </summary>
