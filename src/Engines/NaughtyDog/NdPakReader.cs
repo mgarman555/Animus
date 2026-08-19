@@ -13,6 +13,15 @@ public class NdPakReader
 {
     public enum NdGame { U4, TLL, TLOU2, TLOUP1, Unknown }
 
+    /// <summary>
+    /// Stride of one SubMeshDesc in a TLOU2 PC pak. The Noesis reference walks 176; the real
+    /// layout is 192, verified by scanning contiguous valid descriptors across the Ellie paks
+    /// (the vertex/index count fields sit +8 from where the 176 walk puts them). Every walk of
+    /// the descriptor table must use THIS constant — a stale 176 elsewhere builds a garbage
+    /// address map and whatever depends on it fails silently.
+    /// </summary>
+    public const int SubMeshDescStride = 192;
+
     /// <summary>One entry in the pak's page table — { fileOffset, size, flags }.</summary>
     public readonly record struct PageEntry(uint FileOffset, uint Size, uint Flags);
 

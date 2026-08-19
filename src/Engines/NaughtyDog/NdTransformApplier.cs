@@ -19,7 +19,15 @@ namespace GameAssetExplorer.Engines.NaughtyDog;
 /// </summary>
 public static class NdTransformApplier
 {
-    /// <summary>Returns the number of submesh ranges that got a matrix applied.</summary>
+    /// <summary>
+    /// Returns the number of submesh ranges that got a matrix applied.
+    ///
+    /// The descriptor walk below builds the name → address map that the layout probe uses as
+    /// its validation set, so it has to stride by <see cref="NdPakReader.SubMeshDescStride"/>.
+    /// It previously used the reference's 176, which produced addresses no real descriptor sat
+    /// at — every candidate layout then failed the <c>valid*2 &gt;= total</c> test and this
+    /// returned 0 without reporting anything wrong.
+    /// </summary>
     public static int ApplyTo(NdPakReader reader, MeshAssetData mesh, string label)
     {
         if (reader.GeoEntry == null || !reader.IsTLOU2) return 0;
@@ -56,8 +64,8 @@ public static class NdTransformApplier
 
         for (int i = 0; i < numSubmesh; i++)
         {
-            int sd = submeshesAbs + 176 * i;
-            if (sd + 176 > data.Length) continue;
+            int sd = submeshesAbs + NdPakReader.SubMeshDescStride * i;
+            if (sd + NdPakReader.SubMeshDescStride > data.Length) continue;
 
             var namePtr = reader.ReadPointerFixup(sd + 32);
             string fullName = namePtr.HasValue && namePtr.Value > 0

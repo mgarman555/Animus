@@ -37,7 +37,7 @@ public static class NdPakMeshParser
 {
     const int PAGE_ENTRY_SZ = 12;
     const int FIX_ENTRY_SZ  = 8;
-    const int SMD_STRIDE    = 192;
+    const int SMD_STRIDE    = NdPakReader.SubMeshDescStride;
 
     struct Page { public int FileOffset; public int Size; }
 

@@ -165,10 +165,16 @@ src/
 - Embedded textures are 64×64 GPU-tiled (NVidia 1D-thin GOB layout); must untile before decoding
 
 ### JOINT_HIERARCHY (bind pose)
-Anchor: `jointBase = pageStart + resItemOffset + 20 + ResItemPaddingSz` (the `+20` is unique to this
-resource; GEOMETRY_1 starts straight at the padding).
-- `jointBase+0` u32 boneCount · `+12` **ptr** xformsOffset · `+20` u64 flags · `+28` u64 ukn · `+36` **ptr** namesOffset
-- Xform sub-header at `X = xformsOffset`: `X+18` u16 xformCount · `X+32` u32 headerSize · `X+60` u32 hierarchyOffset
+The payload starts at `payloadStart = pageStart + resItemOffset + ResItemPaddingSz`, exactly like every
+other resource. `+0x14` is just the field offset of the joint count inside it — **not** a header this
+resource prepends. (Field names below come from the `nd_pak.bt` 010 template; the Noesis walk computes
+the same addresses with different names.) So `jointBase = payloadStart + 0x14`:
+- `payloadStart+0x00` u32 version · `+0x10` numJSegments · `+0x14` **nodeCount** · `+0x18`/`+0x1C`
+  boneCount1/2 (skipped) · `+0x20` **ptr** matsOffset · `+0x28`/`+0x30` ptr (real pointers, never
+  dereferenced) · `+0x38` **ptr** namesOffset
+- Xform sub-header at `X = matsOffset`: `X+18` u16 xformCount · `X+32` u32 headerSize · `X+60` u32
+  hierarchyOffset. Also `X+40` u32 `uknFloatsOffs` → nodeCount × 3×4 float matrices — a **second**
+  matrix table nothing reads yet; probe it first if the bind pose ever disagrees with the mesh.
 - Transform array at `X + headerSize`, **stride 48**: `+0` float3 scale (+4 pad) · `+16` float4 quat (x,y,z,**w**) · `+32` float3 position (+4 pad)
 - **The quaternion must be CONJUGATED** and the transform is **PARENT-LOCAL**, not world. Both are
   proven by the reference's import/export round-trip (`multiplyBones` on load, parent-inverse on save).
@@ -192,12 +198,30 @@ The skin-data pointer lives in the SubMeshDesc at **+0x58 or +0x60** — the ref
 struct where it sits at +0x58, but the real 192-byte layout inserts 8 bytes somewhere between the
 material pointer (+0x48, confirmed unshifted) and the count block (+0x88, confirmed shifted).
 `NdSkinParser` validates both candidates against the data and uses whichever is self-consistent.
-- skinDesc: `+0x04` u32 max influences/vertex (≤12) · `+0x10` **ptr** index map · `+0x18` **ptr** weight blob
+- skinDesc: `+0x04` u32 **total influences for the whole submesh** (summed over every vertex — *not*
+  a per-vertex cap; proved by the reference's writer emitting `runningOffset/4` there at L3133).
+  Gating on it as if it were a per-vertex maximum rejects every real submesh and loads the character
+  unskinned with no error. · `+0x10` **ptr** index map · `+0x18` **ptr** weight blob
 - index map: `numVerts × { u32 count, u32 byteOffset }`
 - weights at `weightBlob + byteOffset`: **one u32 per influence** — bits 0..21 weight, bits 22..31 bone
   index. (The reference reads this as `readBits(22)` + `readBits(10)`; Noesis's bit reader is LSB-first
   and re-aligns on every seek, so the pair is exactly a little-endian u32 and the blob is 4-byte aligned.)
-- Raw weights are normalised per vertex, so no dependence on the encoder's fixed-point scale.
+- Raw weights are normalised per vertex, so no dependence on the encoder's fixed-point scale (the
+  encoder uses `int(weight * 4194303)`, i.e. 2²²−1). Bone indices are **global** joint indices, while
+  the transform table is indexed by **boneMap rank** — two coexisting index spaces; crossing them gives
+  a rig that looks right in bind pose and shears the moment it moves.
+- `NdSkinParser` scores both candidate offsets on structural invariants plus corroboration (the `+0x04`
+  total matching, the blob being exactly consumed, rows sequential, rows summing to 2²²−1) and takes
+  the better one.
+
+### Is the mesh actually on this skeleton?
+`SkeletonMath.MeasureRestAgreement` measures the average gap between a vertex and the weight-blended
+world-bind position of its driving joints, as a fraction of rig size. A correct pairing reads a few
+percent; a wrong-but-large-enough rig reads hundreds. The viewer prints it in the transport bar, since
+`NdSkeletonLocator` can only verify a rig has *enough* bones — a different rig of sufficient size
+passes that test and puts every weight on the wrong joint. Override the rig from the viewer's Rig
+dropdown when the check fails. (The threshold assumes character density; a two-bone prop can read 50%
+while being perfectly correct.)
 
 ### Base skeletons
 Character part paks carry skin weights but **no joints** — the joints live once in

@@ -385,12 +385,31 @@
                           IsChecked="True"
                           VerticalAlignment="Center"/>
 
-                <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="6"
+                <TextBlock Grid.Row="1" Grid.Column="0"
+                           Text="Rig"
+                           FontSize="11" Foreground="#777777"
+                           VerticalAlignment="Center"
+                           Margin="0,6,6,0"/>
+
+                <ComboBox Grid.Row="1" Grid.Column="1"
+                          x:Name="SkeletonCombo"
+                          Width="240"
+                          FontSize="11"
+                          Background="#2D2D30"
+                          Foreground="#CCCCCC"
+                          BorderBrush="#3F3F46"
+                          VerticalAlignment="Center"
+                          Margin="0,6,0,0"
+                          ToolTip="Which skeleton drives this mesh. Auto-resolution can only check that a rig has enough bones — override it here if the deformation looks wrong."
+                          SelectionChanged="OnSkeletonChanged"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="2" Grid.ColumnSpan="4"
                            x:Name="AnimStatusText"
                            Text=""
                            FontSize="10" Foreground="#777777"
                            TextWrapping="Wrap"
-                           Margin="0,6,0,0"/>
+                           VerticalAlignment="Center"
+                           Margin="10,6,0,0"/>
             </Grid>
         </Border>
     </Grid>

@@ -434,6 +434,15 @@ public class NaughtyDogPlugin : IGameEngine
                     GameAssetExplorer.Core.Services.Log.Warn($"Skeleton resolve failed for {asset.Name}: {ex.Message}");
                 }
 
+                // Offer every rig in the game so a mis-resolved skeleton can be corrected in
+                // the viewer rather than silently deforming the character wrongly.
+                if (_skeletonLocator is { } locator)
+                {
+                    mesh.AvailableSkeletonPaths = locator.AllSkeletonPaks.Select(p => p.FilePath).ToList();
+                    var meshRef = mesh;
+                    mesh.ResolveSkeletonOverride = path => locator.LoadFrom(path, meshRef);
+                }
+
                 // ── Animations ────────────────────────────────────────────────
                 AttachAnimationSources(mesh, asset);
 
@@ -535,12 +544,14 @@ public class NaughtyDogPlugin : IGameEngine
         foreach (var entry in _pakIndex)
         {
             string file = Path.GetFileNameWithoutExtension(entry.VirtualPath);
-            if (!file.StartsWith("anim-", StringComparison.OrdinalIgnoreCase)) continue;
-
-            // "anim-melee-ellie-npc-t2" matches the character "ellie" on a token boundary, so
-            // a substring test on the token list — not on the raw string — avoids matching
-            // "ellie" inside an unrelated word.
             var tokens = file.Split('-', StringSplitOptions.RemoveEmptyEntries);
+
+            // Match on the "anim" TOKEN rather than an "anim-" prefix: the Remastered build
+            // names its packages "t2r-anim-ellie-workbench", which a prefix test misses.
+            if (!IsAnimPakName(tokens)) continue;
+
+            // Likewise, match the character on a token boundary so "ellie" cannot match
+            // inside an unrelated word.
             if (stems.Any(stem => ContainsTokenRun(tokens, stem.Split('-', StringSplitOptions.RemoveEmptyEntries))))
                 matches.Add(entry);
         }
@@ -621,6 +632,14 @@ public class NaughtyDogPlugin : IGameEngine
         for (int keep = parts.Length; keep >= 1; keep--)
             yield return string.Join('-', parts.Take(keep));
     }
+
+    /// <summary>
+    /// True when one of a filename's '-'-separated tokens is "anim". Covers both the base
+    /// game's <c>anim-melee-ellie-npc-t2</c> and the Remastered build's
+    /// <c>t2r-anim-ellie-workbench</c>.
+    /// </summary>
+    private static bool IsAnimPakName(string[] tokens)
+        => tokens.Any(t => t.Equals("anim", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>True when <paramref name="needle"/> appears as a consecutive token run.</summary>
     private static bool ContainsTokenRun(string[] haystack, string[] needle)
@@ -806,9 +825,6 @@ public class NaughtyDogPlugin : IGameEngine
     private static string SanitiseName(string name)
         => string.Concat(name.Select(c => char.IsLetterOrDigit(c) || c == '-' ? c : '_'));
 
-    private static bool FileNameStartsWith(string path, string prefix)
-        => Path.GetFileName(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
-
     private static AssetType InferAssetType(string path)
     {
         var ext   = Path.GetExtension(path).ToLowerInvariant();
@@ -821,9 +837,13 @@ public class NaughtyDogPlugin : IGameEngine
             // ND .pak files — infer type from folder/name convention
             ".pak" when lower.Contains("texturedict") || lower.Contains("vram")
                                                   => AssetType.Texture,
-            // "anim-*.pak" is Naughty Dog's clip container; the check is on the FILE name so
-            // that an actor pak living under a path containing "anim" is not misfiled.
-            ".pak" when FileNameStartsWith(path, "anim-") => AssetType.Animation,
+            // Naughty Dog's clip container. The test is on the FILE name's tokens — so an
+            // actor pak merely living under a path containing "anim" is not misfiled, and a
+            // Remastered "t2r-anim-*.pak" under actorNN/ is not missed. It has to come before
+            // the "actor" case below, which matches the whole path.
+            ".pak" when IsAnimPakName(Path.GetFileNameWithoutExtension(path)
+                            .Split('-', StringSplitOptions.RemoveEmptyEntries))
+                                                  => AssetType.Animation,
             ".pak" when lower.Contains("actor")   => AssetType.SkeletalMesh,
             ".pak" when lower.Contains("anim")    => AssetType.Animation,
             ".pak" when lower.Contains("sound") || lower.Contains("audio")

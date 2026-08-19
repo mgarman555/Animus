@@ -255,6 +255,10 @@ public partial class AssetBrowserView : UserControl
                 // When nothing decoded, the scan result is the useful thing to show.
                 if (a.FrameCount == 0 && a.RawProperties.TryGetValue("Outcome", out var outcome))
                     AddProp("Decode", outcome?.ToString() ?? "");
+                // An anim pak has no mesh of its own, so there is nothing for the 3D viewer to
+                // show. Say where clips ARE played rather than leaving a dead end.
+                AddProp("Playback", "Open a character mesh and pick this pak from its Clip dropdown "
+                                  + "to play it on that skeleton.");
                 break;
 
             case AudioAssetData au:

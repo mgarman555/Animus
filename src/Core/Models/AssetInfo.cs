@@ -122,6 +122,20 @@ public class MeshAssetData : AssetData
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public Func<AnimationSourceRef, Task<IReadOnlyList<AnimationAssetData>>>? ResolveAnimations { get; set; }
+
+    /// <summary>
+    /// Every skeleton the engine could bind this mesh to, as engine-specific locators. Automatic
+    /// resolution picks one, but it can only check that a rig has ENOUGH bones — a different rig
+    /// of sufficient size passes that test and puts every weight on the wrong joint. This list
+    /// is what lets the viewer offer a manual correction.
+    /// </summary>
+    public IReadOnlyList<string> AvailableSkeletonPaths { get; set; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Set by the engine plugin: loads one of <see cref="AvailableSkeletonPaths"/>. Not serialised.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Func<string, SkeletonData?>? ResolveSkeletonOverride { get; set; }
 }
 
 /// <summary>

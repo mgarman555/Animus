@@ -9,18 +9,30 @@ namespace GameAssetExplorer.Engines.NaughtyDog;
 /// Parses the <c>JOINT_HIERARCHY</c> resource of a Naughty Dog .pak into a
 /// <see cref="SkeletonData"/> — bone names, parent links and the parent-local bind pose.
 ///
-/// Navigation is a port of fmt_nd_pak.py's <c>PakFile.readPak</c> joint block. Layout,
-/// anchored at <c>jointBase = pageStart + resItemOffset + 20 + ResItemPaddingSz</c>
-/// (ResItemPaddingSz = 48 on TLOU2):
+/// Navigation is a port of fmt_nd_pak.py's <c>PakFile.readPak</c> joint block, cross-checked
+/// against the <c>nd_pak.bt</c> 010 template for the real field names.
 ///
-///   jointBase+0   u32   boneCount
-///   jointBase+12  ptr   xformsOffset      (pointer-fixup → absolute)
-///   jointBase+20  u64   flagsOffset       (unused here)
-///   jointBase+28  u64   uknOffset         (unused here)
-///   jointBase+36  ptr   namesOffset       (pointer-fixup → absolute)
+/// The resource payload starts at <c>payloadStart = pageStart + resItemOffset +
+/// ResItemPaddingSz</c> (48 on TLOU2), same as every other resource — the <c>+20</c> below is
+/// simply the field offset of the joint count within it, not a header the resource prepends:
+///
+///   payloadStart+0x00  u32   version
+///   payloadStart+0x10  u32   numJSegments
+///   payloadStart+0x14  u32   nodeCount       ← what the reference calls boneCount
+///   payloadStart+0x18  u32   boneCount1      (skipped)
+///   payloadStart+0x1C  u32   boneCount2      (skipped)
+///   payloadStart+0x20  ptr   matsOffset      → the transform table
+///   payloadStart+0x28  ptr   skeletonFlipDataOffset  (a real pointer; never dereferenced here)
+///   payloadStart+0x30  ptr   jsInfoOffset            (ditto)
+///   payloadStart+0x38  ptr   namesOffset
+///
+/// so with jointBase = payloadStart + 0x14 the fields below read at +0, +12, +20, +28, +36.
 ///
 ///   xformsOffset+16  u16 nodeCount   +18 u16 xformCount   +20 u16 uknCount
 ///   xformsOffset+32  u32 headerSize                        +60 u32 hierarchyOffset
+///   xformsOffset+40  u32 uknFloatsOffs → nodeCount × 3×4 float matrices — a SECOND matrix
+///                    table this parser does not read. Worth probing if the bind pose ever
+///                    disagrees with the mesh.
 ///
 ///   transforms  @ xformsOffset + headerSize, stride 48:
 ///                 +0  float3 scale  (+4 pad)
@@ -353,45 +365,14 @@ public static class NdSkeletonParser
             if (mMin.X <= mMax.X) meshExtent = (mMax - mMin).Length();
         }
 
-        if (skinned?.VertexBuffer is not { } vb || skinned.Skin is not { } skin)
-            return new Score(double.NaN, jointExtent, meshExtent, false);
+        if (skinned == null) return new Score(double.NaN, jointExtent, meshExtent, false);
 
-        int verts = Math.Min(vb.Length / 12, skin.VertexCount);
-        if (verts == 0) return new Score(double.NaN, jointExtent, meshExtent, false);
-
-        int inf     = Math.Max(skin.InfluencesPerVertex, 1);
-        int stride  = Math.Max(1, verts / 2048);   // sample, don't sweep 50k verts twice
-        double sum  = 0;
-        int sampled = 0;
-
-        for (int v = 0; v < verts; v += stride)
-        {
-            var p = ReadVec(vb, v * 12);
-            if (!IsFinite(p)) continue;
-
-            var blended = Vector3.Zero;
-            float wsum = 0;
-            int b0 = v * inf;
-            for (int k = 0; k < inf; k++)
-            {
-                float w = skin.BoneWeights[b0 + k];
-                if (w <= 0) continue;
-                int bi = skin.BoneIndices[b0 + k];
-                if (bi >= world.Length) continue;
-                var jt = world[bi].Translation;
-                if (!IsFinite(jt)) continue;
-                blended += jt * w;
-                wsum    += w;
-            }
-            if (wsum <= 1e-6f) continue;
-
-            sum += (p - blended / wsum).Length();
-            sampled++;
-        }
-
-        return sampled == 0
+        // Same measurement the viewer reports as its rest-pose check, so the two can never
+        // disagree about whether a mesh and a skeleton belong together.
+        var agreement = SkeletonMath.MeasureRestAgreement(skeleton, skinned, world);
+        return agreement.SampleCount == 0
             ? new Score(double.NaN, jointExtent, meshExtent, false)
-            : new Score(sum / sampled, jointExtent, meshExtent, true);
+            : new Score(agreement.MeanDistance, jointExtent, meshExtent, true);
     }
 
     // ── Primitives ───────────────────────────────────────────────────────────

@@ -141,6 +141,103 @@ public static class SkeletonMath
         return palette;
     }
 
+    /// <summary>
+    /// How well a mesh and a skeleton agree that they describe the same character.
+    /// <see cref="MeanDistance"/> is the average gap between a vertex and the weight-blended
+    /// world-bind position of the joints that drive it; <see cref="RigExtent"/> is the
+    /// skeleton's bounding diagonal, so <see cref="Ratio"/> is scale-free.
+    /// </summary>
+    public readonly record struct RestAgreement(double MeanDistance, double RigExtent, int SampleCount)
+    {
+        public double Ratio => RigExtent > 1e-6 ? MeanDistance / RigExtent : double.NaN;
+
+        /// <summary>
+        /// A vertex sits close to the joints that move it, so on a correctly paired mesh and
+        /// skeleton this gap is a small fraction of the rig. A quarter of the whole rig means
+        /// they are not in the same space — a wrong skeleton, or geometry that has had a
+        /// transform baked into it that the bind pose does not know about.
+        ///
+        /// The threshold assumes a CHARACTER-density rig: many joints spread across the body,
+        /// where a typical vertex is a few percent of body height from its nearest joint. On a
+        /// two-bone prop a perfectly correct pairing can legitimately read at 50%, because the
+        /// rig is barely larger than the part it drives. Treat this as a signal for skinned
+        /// characters, not as a universal validity test.
+        /// </summary>
+        public bool Plausible => SampleCount > 0 && Ratio < 0.25;
+
+        public override string ToString() => SampleCount == 0
+            ? "no skinned vertices to measure"
+            : $"{MeanDistance:F4} ({Ratio:P1} of rig size) over {SampleCount} sampled vertices";
+    }
+
+    /// <summary>
+    /// Measure mesh/skeleton agreement in the rest pose. This is the cheap guard against the
+    /// whole class of "looks right until it moves" failures: a skeleton resolved by bone-count
+    /// coverage alone, or vertices carrying a baked transform the bind pose does not account
+    /// for, both produce a mesh that renders correctly and then shears the moment it is posed.
+    /// </summary>
+    public static RestAgreement MeasureRestAgreement(
+        SkeletonData skeleton, LodData lod, Matrix4x4[]? worldBind = null)
+    {
+        if (lod.VertexBuffer is not { } vb || lod.Skin is not { } skin || skeleton.Bones.Count == 0)
+            return new RestAgreement(double.NaN, 0, 0);
+
+        var world = worldBind ?? ComputeWorldBind(skeleton);
+        if (world.Length == 0) return new RestAgreement(double.NaN, 0, 0);
+
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        foreach (var m in world)
+        {
+            var t = m.Translation;
+            if (!float.IsFinite(t.X) || !float.IsFinite(t.Y) || !float.IsFinite(t.Z)) continue;
+            min = Vector3.Min(min, t);
+            max = Vector3.Max(max, t);
+        }
+        double extent = min.X <= max.X ? (max - min).Length() : 0;
+
+        int verts = Math.Min(vb.Length / 12, skin.VertexCount);
+        if (verts == 0) return new RestAgreement(double.NaN, extent, 0);
+
+        int inf = Math.Max(skin.InfluencesPerVertex, 1);
+        int step = Math.Max(1, verts / 2048);
+        double sum = 0;
+        int sampled = 0;
+
+        for (int v = 0; v < verts; v += step)
+        {
+            int o = v * 12;
+            var p = new Vector3(
+                BitConverter.ToSingle(vb, o),
+                BitConverter.ToSingle(vb, o + 4),
+                BitConverter.ToSingle(vb, o + 8));
+            if (!float.IsFinite(p.X) || !float.IsFinite(p.Y) || !float.IsFinite(p.Z)) continue;
+
+            var blended = Vector3.Zero;
+            float wsum = 0;
+            int row = v * inf;
+            for (int k = 0; k < inf; k++)
+            {
+                float w = skin.BoneWeights[row + k];
+                if (w <= 0) continue;
+                int b = skin.BoneIndices[row + k];
+                if (b >= world.Length) continue;
+                var jt = world[b].Translation;
+                if (!float.IsFinite(jt.X) || !float.IsFinite(jt.Y) || !float.IsFinite(jt.Z)) continue;
+                blended += jt * w;
+                wsum += w;
+            }
+            if (wsum <= 1e-6f) continue;
+
+            sum += (p - blended / wsum).Length();
+            sampled++;
+        }
+
+        return sampled == 0
+            ? new RestAgreement(double.NaN, extent, 0)
+            : new RestAgreement(sum / sampled, extent, sampled);
+    }
+
     /// <summary>World-space bind position of every bone (the joint pivots the viewer draws).</summary>
     public static Vector3[] BindPositions(SkeletonData skeleton)
     {

@@ -1,3 +1,4 @@
+using System.IO;
 using System.Numerics;
 using System.Windows;
 using System.Windows.Controls;
@@ -42,6 +43,7 @@ public partial class SkeletalMeshViewerWindow
     private bool  _renderHooked;
     private bool  _sliderSyncing;
     private bool  _clipComboSyncing;
+    private bool  _skeletonComboSyncing;
     private bool  _decodingClip;
 
     /// <summary>One row of the clip dropdown.</summary>
@@ -85,7 +87,83 @@ public partial class SkeletalMeshViewerWindow
             _localScratch = null;
         }
 
+        BuildSkeletonList();
         BuildClipList(lod, skeleton);
+    }
+
+    /// <summary>
+    /// Populate the rig picker. Automatic resolution can only verify that a skeleton has
+    /// enough bones to cover the mesh's weights — a different rig of sufficient size passes
+    /// that test and puts every weight on the wrong joint, so the correction has to be
+    /// reachable.
+    /// </summary>
+    private void BuildSkeletonList()
+    {
+        _skeletonComboSyncing = true;
+        SkeletonCombo.Items.Clear();
+
+        var paths = _meshData?.AvailableSkeletonPaths ?? Array.Empty<string>();
+        string current = _meshData?.Skeleton?.SourceName ?? string.Empty;
+        int selected = 0;
+
+        SkeletonCombo.Items.Add(new SkeletonChoice(
+            string.IsNullOrEmpty(current) ? "(none resolved)" : $"{current}  (auto)", null));
+
+        for (int i = 0; i < paths.Count; i++)
+        {
+            string label = Path.GetFileNameWithoutExtension(paths[i]);
+            SkeletonCombo.Items.Add(new SkeletonChoice(label, paths[i]));
+            if (!string.IsNullOrEmpty(current) &&
+                label.Equals(Path.GetFileNameWithoutExtension(current), StringComparison.OrdinalIgnoreCase))
+                selected = i + 1;
+        }
+
+        SkeletonCombo.SelectedIndex = selected;
+        SkeletonCombo.IsEnabled = paths.Count > 0 && _meshData?.ResolveSkeletonOverride != null;
+        _skeletonComboSyncing = false;
+    }
+
+    private sealed record SkeletonChoice(string Label, string? Path)
+    {
+        public override string ToString() => Label;
+    }
+
+    private void OnSkeletonChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_skeletonComboSyncing || _meshData == null) return;
+        if (SkeletonCombo.SelectedItem is not SkeletonChoice choice || choice.Path == null) return;
+        if (_meshData.ResolveSkeletonOverride is not { } resolve) return;
+
+        var replacement = resolve(choice.Path);
+        if (replacement is not { Bones.Count: > 0 })
+        {
+            AnimStatusText.Text = $"{choice.Label}: no usable skeleton in that pak.";
+            return;
+        }
+
+        StopPlayback();
+        _meshData.Skeleton = replacement;
+        _sampler = null;
+        _time = 0;
+
+        _worldBind    = SkeletonMath.ComputeWorldBind(replacement);
+        _inverseBind  = SkeletonMath.ComputeInverseBind(_worldBind);
+        _localScratch = new Matrix4x4[replacement.Bones.Count];
+
+        ChkArmature.IsEnabled = true;
+        ApplyRestPose();
+
+        var lod = CurrentLod();
+        if (lod != null) BuildClipList(lod, replacement);
+        UpdateArmatureVisual();
+    }
+
+    private LodData? CurrentLod()
+    {
+        if (_meshData == null || _meshData.Lods.Count == 0) return null;
+        int idx = LodCombo.SelectedIndex;
+        if (idx < 0 || idx >= _meshData.Lods.Count) idx = 0;
+        return _meshData.Lods[idx];
     }
 
     private void BuildClipList(LodData lod, SkeletonData? skeleton)
@@ -100,9 +178,16 @@ public partial class SkeletalMeshViewerWindow
         foreach (var c in _clips)
             AnimClipCombo.Items.Add(new ClipChoice(DescribeClip(c), c, null));
 
+        var decoded = new HashSet<string>(
+            _clips.Select(c => c.RawProperties.TryGetValue("Source", out var v) ? v?.ToString() ?? "" : ""),
+            StringComparer.OrdinalIgnoreCase);
+
         foreach (var src in _meshData?.AnimationSources ?? new List<AnimationSourceRef>())
+        {
+            if (decoded.Contains(src.DisplayName)) continue;   // already read this pak
             AnimClipCombo.Items.Add(new ClipChoice(
                 $"⬇  {src.DisplayName}  ({FormatSize(src.SizeBytes)})", null, src));
+        }
 
         AnimClipCombo.SelectedIndex = 0;
         _clipComboSyncing = false;
@@ -110,8 +195,27 @@ public partial class SkeletalMeshViewerWindow
         bool posable = skeleton is { Bones.Count: > 0 } && lod.Skin != null;
         AnimBar.Visibility = skeleton is { Bones.Count: > 0 } ? Visibility.Visible : Visibility.Collapsed;
 
-        AnimStatusText.Text = DescribeRig(lod, skeleton, posable);
+        AnimStatusText.Text = DescribeRigWithCheck(lod, skeleton, posable);
         SetTransportEnabled(false);
+    }
+
+    /// <summary>
+    /// Does the mesh actually belong to this skeleton? Measured, not assumed: a vertex sits
+    /// close to the joints that drive it, so the average gap between the two — as a fraction
+    /// of the rig — is small when they are paired correctly and large when they are not. This
+    /// is the one cheap check that catches a plausible-but-wrong rig and geometry carrying a
+    /// baked transform the bind pose does not know about; both render fine and then shear the
+    /// moment the character moves.
+    /// </summary>
+    private string DescribeRestCheck(LodData lod, SkeletonData skeleton)
+    {
+        var a = SkeletonMath.MeasureRestAgreement(skeleton, lod, _worldBind);
+        if (a.SampleCount == 0) return string.Empty;
+
+        return a.Plausible
+            ? $"  Rest-pose check: vertices sit {a.Ratio:P1} of rig size from their driving joints ✓"
+            : $"  ⚠ Rest-pose check FAILED: vertices sit {a.Ratio:P1} of rig size from their driving " +
+              "joints. The mesh and this skeleton are not in the same space — try another rig.";
     }
 
     /// <summary>
@@ -136,6 +240,15 @@ public partial class SkeletalMeshViewerWindow
         return $"Skeleton: {skeleton.Bones.Count} bones from {src}. " +
                $"Skinned with up to {skin.InfluencesPerVertex} influences/vertex.{coverage}" +
                (posable ? "" : "  (not posable)");
+    }
+
+    /// <summary>Rig description plus the measured rest-pose check.</summary>
+    private string DescribeRigWithCheck(LodData lod, SkeletonData? skeleton, bool posable)
+    {
+        string baseText = DescribeRig(lod, skeleton, posable);
+        return skeleton is { Bones.Count: > 0 } && lod.Skin != null
+            ? baseText + DescribeRestCheck(lod, skeleton)
+            : baseText;
     }
 
     private static string DescribeClip(AnimationAssetData c)
@@ -217,6 +330,10 @@ public partial class SkeletalMeshViewerWindow
             for (int i = 0; i < usable.Count; i++)
             {
                 _clips.Add(usable[i]);
+                // Park them on the asset too, so switching LOD or reopening the viewer does not
+                // throw away a decode that just cost seconds of I/O.
+                if (_meshData != null && !_meshData.Animations.Contains(usable[i]))
+                    _meshData.Animations.Add(usable[i]);
                 AnimClipCombo.Items.Insert(insertAt + i, new ClipChoice(DescribeClip(usable[i]), usable[i], null));
             }
             AnimClipCombo.SelectedIndex = insertAt;
