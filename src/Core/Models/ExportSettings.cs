@@ -51,6 +51,26 @@ public class ExportSettings
     /// <summary>Include material slot names in FBX (helps the Blender/UE addon assign materials)</summary>
     public bool ExportMaterialSlotNames { get; set; } = true;
 
+    /// <summary>
+    /// Bind the mesh to its skeleton on export (glTF skins: joints, weights, inverse-bind
+    /// matrices). Off exports the mesh in bind pose with the skeleton as inert nodes.
+    /// </summary>
+    public bool ExportSkinWeights { get; set; } = true;
+
+    /// <summary>
+    /// Write animation clips into the model file. Requires <see cref="ExportSkinWeights"/> to
+    /// be meaningful — a clip without a skin binding animates nothing.
+    /// </summary>
+    public bool ExportAnimations { get; set; } = true;
+
+    /// <summary>
+    /// Influences kept per vertex on export. The source data allows up to 12, but 4 is what
+    /// the glTF base spec stores and what Blender and UE import without extra setup. Dropped
+    /// influences are the smallest ones and the remainder is renormalised; the exporter warns
+    /// if anything meaningful was discarded.
+    /// </summary>
+    public int MaxInfluencesPerVertex { get; set; } = 4;
+
     // ─── Audio Settings ───────────────────────────────────────────────────────
 
     public AudioExportFormat AudioFormat { get; set; } = AudioExportFormat.Wav;

@@ -74,6 +74,10 @@ public partial class SkeletalMeshViewerWindow : Window
         ViewportContainer.MouseMove  += OnMouseMove;
         ViewportContainer.MouseWheel += OnMouseWheel;
 
+        // The per-frame skinning hook keeps running after the window goes away unless it is
+        // explicitly detached, which would leak a whole mesh per closed viewer.
+        Closed += (_, _) => StopPlayback();
+
         Populate();
     }
 
@@ -188,6 +192,7 @@ public partial class SkeletalMeshViewerWindow : Window
 
             BuildSubmeshList();
             UpdateMeshVisual();
+            InitAnimation(lod);
             UpdateArmatureVisual();
             FitCameraToVisible();
 
@@ -375,70 +380,6 @@ public partial class SkeletalMeshViewerWindow : Window
     }
 
     // ── Armature overlay ──────────────────────────────────────────────────────
-
-    private void UpdateArmatureVisual()
-    {
-        if (ChkArmature.IsChecked != true || _meshData?.Skeleton?.Bones is not { Count: > 0 } bones)
-        {
-            ArmatureVisual.Content = null;
-            return;
-        }
-
-        // Compute world-ish positions by walking the parent chain (translation-only —
-        // ignores bone rotations, fine for v1 visualization in bind pose)
-        var worldPos = new Point3D[bones.Count];
-        for (int i = 0; i < bones.Count; i++)
-        {
-            var b = bones[i];
-            var local = new Point3D(b.Position[0], b.Position[1], b.Position[2]);
-            if (b.ParentIndex >= 0 && b.ParentIndex < i)
-                worldPos[i] = new Point3D(
-                    worldPos[b.ParentIndex].X + local.X,
-                    worldPos[b.ParentIndex].Y + local.Y,
-                    worldPos[b.ParentIndex].Z + local.Z);
-            else
-                worldPos[i] = local;
-        }
-
-        // Pick a small joint size relative to skeleton bounds
-        double minX = double.MaxValue, maxX = double.MinValue;
-        double minY = double.MaxValue, maxY = double.MinValue;
-        double minZ = double.MaxValue, maxZ = double.MinValue;
-        foreach (var p in worldPos)
-        {
-            if (p.X < minX) minX = p.X; if (p.X > maxX) maxX = p.X;
-            if (p.Y < minY) minY = p.Y; if (p.Y > maxY) maxY = p.Y;
-            if (p.Z < minZ) minZ = p.Z; if (p.Z > maxZ) maxZ = p.Z;
-        }
-        double extent = Math.Max(Math.Max(maxX - minX, maxY - minY), maxZ - minZ);
-        if (extent <= 0) extent = 1;
-        double joint = extent * 0.012;
-        if (joint < 0.001) joint = 0.001;
-
-        var group = new Model3DGroup();
-        var jointMat = new DiffuseMaterial(new SolidColorBrush(Color.FromRgb(0xFF, 0xC8, 0x40)));
-        var boneMat  = new DiffuseMaterial(new SolidColorBrush(Color.FromRgb(0xC0, 0xA0, 0x40)));
-
-        // Joint markers
-        foreach (var p in worldPos)
-            group.Children.Add(new GeometryModel3D
-            {
-                Geometry = MakeBox(p, joint),
-                Material = jointMat,
-            });
-
-        // Bone segments (as thin elongated boxes parent → child)
-        for (int i = 0; i < bones.Count; i++)
-        {
-            int p = bones[i].ParentIndex;
-            if (p < 0 || p >= bones.Count) continue;
-            var seg = MakeBoneSegment(worldPos[p], worldPos[i], joint * 0.5);
-            if (seg != null)
-                group.Children.Add(new GeometryModel3D { Geometry = seg, Material = boneMat });
-        }
-
-        ArmatureVisual.Content = group;
-    }
 
     private static MeshGeometry3D MakeBox(Point3D center, double size)
     {

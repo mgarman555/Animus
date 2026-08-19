@@ -429,6 +429,11 @@ public static class NdPakMeshParser
             // Resolve this submesh's material → per-submesh diffuse/normal texPaths
             ParseSubmeshMaterial(data, pages, fixups, sd, vrams, smdInfo);
 
+            // Resolve this submesh's vertex→bone influences. Unskinned submeshes (props,
+            // level geometry) simply come back null and stay static.
+            smdInfo.Skin = NdSkinParser.TryParse(
+                data, addr => ResolvePtr(data, pages, fixups, addr), sd, nVerts, info.Name);
+
             if (!smdByLod.TryGetValue(lodIdx, out var bucket))
                 smdByLod[lodIdx] = bucket = new List<SMDInfo>();
             bucket.Add(smdInfo);
@@ -446,6 +451,23 @@ public static class NdPakMeshParser
             bool hasUvs  = smds.All(s => s.UvBufAbs >= 0);
             int totalVerts = 0, totalTris = 0;
             var submeshes = new List<SubmeshInfo>();
+
+            // Skin rows are fixed-width per LOD, so the width is the widest submesh's.
+            // Submeshes with no skin table leave their rows at weight 0 and the skinner
+            // passes those vertices through unchanged.
+            int lodInfluences = smds.Where(s => s.Skin != null).Select(s => s.Skin!.Influences)
+                                    .DefaultIfEmpty(0).Max();
+            int lodVertTotal  = smds.Sum(s => s.NVerts);
+            ushort[]? lodBoneIdx = null;
+            float[]?  lodBoneWt  = null;
+            int lodMaxBone = -1;
+            if (lodInfluences > 0)
+            {
+                lodBoneIdx = new ushort[(long)lodVertTotal * lodInfluences <= int.MaxValue
+                    ? lodVertTotal * lodInfluences : 0];
+                if (lodBoneIdx.Length == 0) { lodInfluences = 0; lodBoneIdx = null; }
+                else lodBoneWt = new float[lodVertTotal * lodInfluences];
+            }
 
             foreach (var s in smds)
             {
@@ -507,6 +529,24 @@ public static class NdPakMeshParser
                     uvBytes.AddRange(ubuf);
                 }
 
+                // Skin rows, re-packed from the submesh's width to the LOD's width
+                if (lodInfluences > 0 && lodBoneIdx != null && lodBoneWt != null && s.Skin is { } sk)
+                {
+                    int src = sk.Influences;
+                    int copy = Math.Min(src, lodInfluences);
+                    for (int v = 0; v < s.NVerts && v < sk.VertexCount; v++)
+                    {
+                        int dstRow = (submeshVertexStart + v) * lodInfluences;
+                        int srcRow = v * src;
+                        for (int k = 0; k < copy; k++)
+                        {
+                            lodBoneIdx[dstRow + k] = sk.BoneIndices[srcRow + k];
+                            lodBoneWt [dstRow + k] = sk.BoneWeights[srcRow + k];
+                        }
+                    }
+                    if (sk.MaxBoneIndex > lodMaxBone) lodMaxBone = sk.MaxBoneIndex;
+                }
+
                 submeshes.Add(new SubmeshInfo
                 {
                     Name        = string.IsNullOrEmpty(s.Name) ? $"Shape{submeshes.Count}" : s.Name,
@@ -533,6 +573,16 @@ public static class NdPakMeshParser
                     IndexBuffer   = idxBytes.ToArray(),
                     UvBuffer      = hasUvs && uvBytes.Count == totalVerts * 8 ? uvBytes.ToArray() : null,
                     Submeshes     = submeshes,
+                    Skin          = lodInfluences > 0 && lodBoneIdx != null && lodBoneWt != null
+                        ? new SkinBinding
+                        {
+                            InfluencesPerVertex = lodInfluences,
+                            VertexCount         = totalVerts,
+                            BoneIndices         = lodBoneIdx,
+                            BoneWeights         = lodBoneWt,
+                            MaxBoneIndex        = lodMaxBone,
+                        }
+                        : null,
                 });
         }
 
@@ -545,6 +595,20 @@ public static class NdPakMeshParser
             ["Triangles"] = lod0.TriangleCount,
             ["LODs"]      = lods.Count,
         };
+
+        var allSkins = smdByLod.Values.SelectMany(l => l).Select(s => s.Skin)
+                                .Where(s => s != null).Select(s => s!).ToList();
+        if (allSkins.Count > 0)
+        {
+            NdSkinParser.LogLayout(info.Name, allSkins);
+            props["Skinned"] = $"{allSkins.Count} submesh(es), " +
+                               $"{lod0.Skin?.InfluencesPerVertex ?? 0} influences/vertex, " +
+                               $"max bone index {lod0.Skin?.MaxBoneIndex ?? -1}";
+        }
+        else
+        {
+            props["Skinned"] = "no";
+        }
 
         var meshAssetData = new MeshAssetData
         {
@@ -871,5 +935,7 @@ public static class NdPakMeshParser
         public string MaterialName       = "";
         public string DiffuseTexturePath = "";
         public string NormalTexturePath  = "";
+        // Skin weights (resolved from the skin-data pointer at SMD+0x58 or +0x60)
+        public NdSkinParser.SubmeshSkin? Skin;
     }
 }

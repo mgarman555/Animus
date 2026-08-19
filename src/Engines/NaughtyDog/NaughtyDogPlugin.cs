@@ -31,6 +31,9 @@ public class NaughtyDogPlugin : IGameEngine
     // PAK directory mode
     private readonly List<NdPakEntry>                         _pakIndex = new();
 
+    // Skeleton resolution across part paks (ellie-body.pak → ellie-skel.pak)
+    private NdSkeletonLocator? _skeletonLocator;
+
     // Full-resolution texture dictionary (texturedict3 paks)
     private readonly NdTextureDictionary _texDict = new();
     private Task? _texDictBuildTask;
@@ -215,6 +218,8 @@ public class NaughtyDogPlugin : IGameEngine
             });
         }
 
+        _skeletonLocator = new NdSkeletonLocator(_pakIndex);
+
         progress?.Report($"Indexed {_pakIndex.Count:N0} .pak assets.");
         Console.WriteLine($"[ND] PAK dir: {config.DisplayName} ({_pakIndex.Count:N0} files)");
 
@@ -260,6 +265,7 @@ public class NaughtyDogPlugin : IGameEngine
         _readerByPath.Clear();
         _psarcIndex.Clear();
         _pakIndex.Clear();
+        _skeletonLocator = null;
         _pakMode = false;
         _currentConfig = null;
         _texDictBuildTask = null;
@@ -321,6 +327,31 @@ public class NaughtyDogPlugin : IGameEngine
         if (ext == ".dds")
             return BuildTextureAssetData(asset, rawData);
 
+        // Animation paks: decode clips directly. There is no mesh in these, so the viewer
+        // shows them as a clip list until one is retargeted onto a character.
+        if (ext == ".pak" && asset.Type == AssetType.Animation)
+        {
+            var animReader = new NdPakReader(rawData);
+            if (animReader.ReadHeader())
+            {
+                var clips = NdAnimParser.DecodeAll(animReader, skeleton: null, asset.Name, out var animReport);
+                var result = clips.Count > 0
+                    ? clips[0]
+                    : new AnimationAssetData
+                    {
+                        Info = asset, ClipName = asset.Name, FrameCount = 0,
+                    };
+                result.Info = asset;
+                result.RawProperties["Scan"]    = animReport.Summarise();
+                result.RawProperties["Outcome"] = animReport.Outcome;
+                foreach (var r in animReport.Resources.Take(200))
+                    result.RawProperties[$"Resource[{result.RawProperties.Count}]"] = $"{r.Type}: {r.Name}";
+                if (clips.Count > 1)
+                    result.RawProperties["AdditionalClips"] = clips.Count - 1;
+                return result;
+            }
+        }
+
         // Try to parse ND .pak as mesh geometry (actors, levels, or any unidentified pak)
         if (ext == ".pak" && asset.Type is AssetType.SkeletalMesh or AssetType.StaticMesh
                                           or AssetType.Level or AssetType.Unknown)
@@ -381,6 +412,31 @@ public class NaughtyDogPlugin : IGameEngine
             }
             if (mesh != null)
             {
+                // ── Skeleton ──────────────────────────────────────────────────
+                // Character part paks carry skin weights but no joints; the joints live once
+                // in a shared <name>-skel.pak. Without this link the weights index bones that
+                // do not exist locally and nothing can be posed.
+                try
+                {
+                    mesh.Skeleton = _skeletonLocator?.Resolve(asset, reader, mesh);
+                    if (mesh.Skeleton is { Bones.Count: > 0 } sk)
+                    {
+                        mesh.RawProperties["Skeleton"] =
+                            $"{sk.Bones.Count} bones (from {(string.IsNullOrEmpty(sk.SourceName) ? "this pak" : sk.SourceName)})";
+                    }
+                    else if (mesh.Lods.Any(l => l.Skin != null))
+                    {
+                        mesh.RawProperties["Skeleton"] = "not found — mesh is skinned but no matching *-skel.pak was located";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    GameAssetExplorer.Core.Services.Log.Warn($"Skeleton resolve failed for {asset.Name}: {ex.Message}");
+                }
+
+                // ── Animations ────────────────────────────────────────────────
+                AttachAnimationSources(mesh, asset);
+
                 // Merge full metadata (all VRAM_DESC records, resource type summary) into props
                 foreach (var (k, v) in NdPakMeshParser.ParseMetadata(rawData))
                     mesh.RawProperties.TryAdd(k, v);
@@ -460,6 +516,124 @@ public class NaughtyDogPlugin : IGameEngine
             RawData       = rawData,
             RawProperties = meta,
         };
+    }
+
+    // ── Animation wiring ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// List the animation paks that belong to this character and hand the mesh a callback that
+    /// decodes one on demand. Naughty Dog names them <c>anim-&lt;character&gt;-*.pak</c>, and a
+    /// full set is far too large to decode eagerly, so nothing is read here beyond the index.
+    /// </summary>
+    private void AttachAnimationSources(MeshAssetData mesh, AssetInfo asset)
+    {
+        if (_pakIndex.Count == 0) return;
+
+        var stems = NameStems(asset.Name).ToList();
+        var matches = new List<NdPakEntry>();
+
+        foreach (var entry in _pakIndex)
+        {
+            string file = Path.GetFileNameWithoutExtension(entry.VirtualPath);
+            if (!file.StartsWith("anim-", StringComparison.OrdinalIgnoreCase)) continue;
+
+            // "anim-melee-ellie-npc-t2" matches the character "ellie" on a token boundary, so
+            // a substring test on the token list — not on the raw string — avoids matching
+            // "ellie" inside an unrelated word.
+            var tokens = file.Split('-', StringSplitOptions.RemoveEmptyEntries);
+            if (stems.Any(stem => ContainsTokenRun(tokens, stem.Split('-', StringSplitOptions.RemoveEmptyEntries))))
+                matches.Add(entry);
+        }
+
+        foreach (var m in matches.OrderBy(m => m.VirtualPath, StringComparer.OrdinalIgnoreCase))
+        {
+            mesh.AnimationSources.Add(new AnimationSourceRef
+            {
+                DisplayName = Path.GetFileNameWithoutExtension(m.VirtualPath),
+                Locator     = m.FilePath,
+                EngineId    = EngineId,
+                SizeBytes   = m.FileSize,
+            });
+        }
+
+        if (mesh.AnimationSources.Count > 0)
+            mesh.RawProperties["Animations"] = $"{mesh.AnimationSources.Count} anim pak(s) found for this character";
+
+        var skeleton = mesh.Skeleton;
+        mesh.ResolveAnimations = src => Task.Run<IReadOnlyList<AnimationAssetData>>(
+            () => DecodeAnimationPak(src, skeleton));
+    }
+
+    /// <summary>Read one anim pak and decode whatever clips it yields.</summary>
+    private static IReadOnlyList<AnimationAssetData> DecodeAnimationPak(
+        AnimationSourceRef src, SkeletonData? skeleton)
+    {
+        try
+        {
+            var bytes = File.ReadAllBytes(src.Locator);
+            var reader = new NdPakReader(bytes);
+            if (!reader.ReadHeader())
+            {
+                GameAssetExplorer.Core.Services.Log.Warn(
+                    $"NdAnimParser[{src.DisplayName}]: not a readable ND pak");
+                return Array.Empty<AnimationAssetData>();
+            }
+
+            var clips = NdAnimParser.DecodeAll(reader, skeleton, src.DisplayName, out var report);
+            foreach (var c in clips)
+            {
+                c.SkeletonPath = skeleton?.SourceName ?? string.Empty;
+                c.RawProperties["Source"]   = src.DisplayName;
+                c.RawProperties["Decoder"]  = report.Layout;
+                c.RawProperties["Outcome"]  = report.Outcome;
+            }
+
+            // Even when nothing decodes, surface what the pak contains so the UI can say why.
+            if (clips.Count == 0 && report.Resources.Count > 0)
+            {
+                var placeholder = new AnimationAssetData
+                {
+                    Info       = new AssetInfo { Name = src.DisplayName, Type = AssetType.Animation },
+                    ClipName   = src.DisplayName,
+                    FrameCount = 0,
+                };
+                placeholder.RawProperties["Outcome"] = report.Outcome;
+                placeholder.RawProperties["Scan"]    = report.Summarise();
+                foreach (var r in report.Resources.Take(64))
+                    placeholder.JointNames.Add($"{r.Type}: {r.Name}");
+                return new[] { placeholder };
+            }
+
+            return clips;
+        }
+        catch (Exception ex)
+        {
+            GameAssetExplorer.Core.Services.Log.Warn(
+                $"NdAnimParser[{src.DisplayName}]: {ex.Message}");
+            return Array.Empty<AnimationAssetData>();
+        }
+    }
+
+    /// <summary>"abby-prisoner-hair" → "abby-prisoner-hair", "abby-prisoner", "abby".</summary>
+    private static IEnumerable<string> NameStems(string assetName)
+    {
+        var parts = assetName.Split('-', StringSplitOptions.RemoveEmptyEntries);
+        for (int keep = parts.Length; keep >= 1; keep--)
+            yield return string.Join('-', parts.Take(keep));
+    }
+
+    /// <summary>True when <paramref name="needle"/> appears as a consecutive token run.</summary>
+    private static bool ContainsTokenRun(string[] haystack, string[] needle)
+    {
+        if (needle.Length == 0 || needle.Length > haystack.Length) return false;
+        for (int i = 0; i + needle.Length <= haystack.Length; i++)
+        {
+            bool ok = true;
+            for (int k = 0; k < needle.Length; k++)
+                if (!haystack[i + k].Equals(needle[k], StringComparison.OrdinalIgnoreCase)) { ok = false; break; }
+            if (ok) return true;
+        }
+        return false;
     }
 
     private async Task<AssetData> LoadPsarcAssetAsync(AssetInfo asset)
@@ -632,6 +806,9 @@ public class NaughtyDogPlugin : IGameEngine
     private static string SanitiseName(string name)
         => string.Concat(name.Select(c => char.IsLetterOrDigit(c) || c == '-' ? c : '_'));
 
+    private static bool FileNameStartsWith(string path, string prefix)
+        => Path.GetFileName(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+
     private static AssetType InferAssetType(string path)
     {
         var ext   = Path.GetExtension(path).ToLowerInvariant();
@@ -644,6 +821,9 @@ public class NaughtyDogPlugin : IGameEngine
             // ND .pak files — infer type from folder/name convention
             ".pak" when lower.Contains("texturedict") || lower.Contains("vram")
                                                   => AssetType.Texture,
+            // "anim-*.pak" is Naughty Dog's clip container; the check is on the FILE name so
+            // that an actor pak living under a path containing "anim" is not misfiled.
+            ".pak" when FileNameStartsWith(path, "anim-") => AssetType.Animation,
             ".pak" when lower.Contains("actor")   => AssetType.SkeletalMesh,
             ".pak" when lower.Contains("anim")    => AssetType.Animation,
             ".pak" when lower.Contains("sound") || lower.Contains("audio")

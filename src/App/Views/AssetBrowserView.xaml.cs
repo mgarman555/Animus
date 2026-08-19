@@ -223,6 +223,16 @@ public partial class AssetBrowserView : UserControl
                                    : m.IsSkeletal ? "Skeletal" : "Static");
                 AddProp("LOD Count",      m.Lods.Count.ToString());
                 AddProp("Bone Count",     m.Skeleton?.Bones.Count.ToString() ?? "—");
+                if (m.Skeleton is { Bones.Count: > 0 } sk && !string.IsNullOrEmpty(sk.SourceName))
+                    AddProp("Skeleton From", sk.SourceName);
+                var skin0 = m.Lods.FirstOrDefault()?.Skin;
+                AddProp("Skinned", skin0 == null
+                    ? "no"
+                    : $"{skin0.InfluencesPerVertex} influences/vertex, up to bone {skin0.MaxBoneIndex}");
+                if (m.Animations.Count > 0 || m.AnimationSources.Count > 0)
+                    AddProp("Animations", m.Animations.Count > 0
+                        ? $"{m.Animations.Count} clip(s) loaded"
+                        : $"{m.AnimationSources.Count} anim pak(s) available");
                 AddProp("Material Slots", m.MaterialSlots.Count.ToString());
                 foreach (var slot in m.MaterialSlots)
                     AddProp($"  Slot {slot.SlotIndex}", slot.MaterialName);
@@ -236,10 +246,15 @@ public partial class AssetBrowserView : UserControl
 
             case AnimationAssetData a:
                 AddSeparator();
+                if (!string.IsNullOrEmpty(a.ClipName)) AddProp("Clip", a.ClipName);
                 AddProp("Frame Rate",  $"{a.FrameRate:F1} fps");
                 AddProp("Frames",      a.FrameCount.ToString());
                 AddProp("Duration",    $"{a.Duration:F2} s");
                 AddProp("Track Count", a.Tracks.Count.ToString());
+                if (a.IsAdditive) AddProp("Additive", "Yes — layers onto a base pose");
+                // When nothing decoded, the scan result is the useful thing to show.
+                if (a.FrameCount == 0 && a.RawProperties.TryGetValue("Outcome", out var outcome))
+                    AddProp("Decode", outcome?.ToString() ?? "");
                 break;
 
             case AudioAssetData au:

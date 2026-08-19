@@ -11,8 +11,16 @@ Educational game asset explorer (.exe) for browsing, previewing, and exporting a
 > resolves its own diffuse/normal texPath. ③ Per-submesh full-res textures wired to the viewer (plugin
 > resolves each via the texturedict; `SkeletalMeshViewerWindow` paints each submesh its own brush). Body
 > decodes as denim shirt + Ellie's jeans + Converse high-tops, each its own 2K atlas (PNG-verified).
-> **Next:** open the app and eyeball the textured Ellie in the 3D viewer (only thing not yet GUI-checked),
-> then the multi-game UI shell (`design/ui-mockup.html`) and the RAGE `.ytd` reader.
+>
+> **Animation foundation (this pass — not yet GUI-checked against real paks):** `JOINT_HIERARCHY` →
+> `SkeletonData`, per-submesh skin weights, base `*-skel.pak` discovery, a pose/skinning runtime, a
+> viewport transport bar with live CPU skinning, and glTF export of skins + animations. The clip
+> KEYFRAME BITSTREAM is the one open piece — see "TLOU2 animation" below.
+>
+> **Next:** open the app on `actor97/ellie-*.pak` and eyeball ① the textured Ellie (still never
+> GUI-checked) and ② the armature overlay + bind pose; then run `tools/nd_anim_probe.py` on a real
+> `anim-*.pak` and feed the result back into `NdAnimParser`. After that: the multi-game UI shell
+> (`design/ui-mockup.html`) and the RAGE `.ytd` reader.
 
 ---
 
@@ -42,6 +50,9 @@ src/
     Models/GameConfig.cs         # Persistent game library entry
     Services/ConfigManager.cs    # Load/save games.json to %AppData%
     Services/PluginLoader.cs     # Runtime + built-in plugin registration
+    Animation/SkeletonMath.cs    # Bind pose: local→world, inverse bind, skinning palette
+    Animation/AnimationSampler.cs# Clip + time → parent-local pose for a skeleton
+    Animation/CpuSkinner.cs      # Linear-blend skinning (WPF has no GPU skinning path)
 
   App/                           # WPF application (WinExe)
     ViewModels/                  # CommunityToolkit MVVM view-models
@@ -51,7 +62,11 @@ src/
   Engines/
     UnrealEngine/                # CUE4Parse wrapper (UE4/UE5 .pak, .utoc/.ucas)
     NaughtyDog/                  # TLOU2 .pak binary parser (custom format)
-      NdPakMeshParser.cs         # Geometry decoding (quantised bitstream)
+      NdPakMeshParser.cs         # Geometry decoding (quantised bitstream) + skin hookup
+      NdSkeletonParser.cs        # JOINT_HIERARCHY → SkeletonData (bind pose)
+      NdSkinParser.cs            # Per-submesh vertex→bone weights
+      NdSkeletonLocator.cs       # Finds the shared <name>-skel.pak for a part pak
+      NdAnimParser.cs            # ANIM/ANIM_GROUP/ANIM_STREAM discovery + track detection
       PsarcReader.cs             # PSARC archive reader
     RageEngine/                  # GTA5 / RDR2 (RPF archives) — stub
 
@@ -88,8 +103,19 @@ src/
 - NaughtyDog per-submesh textures: plugin resolves each submesh's diffuse to full-res via `texturedict3`;
   `SkeletalMeshViewerWindow` decodes + paints each submesh its own `ImageBrush` (PNG-verified; GUI eyeball pending)
 - Mesh-level diffuse: VRAM_DESC scan + full-res `texturedict3` hash lookup + BCnEncoder decode + ImageBrush
+- NaughtyDog skeletons: `JOINT_HIERARCHY` → bone names, parent links, parent-local bind TRS
+- NaughtyDog skinning: per-submesh weight tables (up to 12 influences/vertex), merged per LOD
+- Base-skeleton discovery: `ellie-body.pak` → `ellie-skel.pak`; NPCs fall back to a shared rig
+  (`base-male-skel.pak`, `base-female-skel.pak`, …) by bone-count coverage + name overlap
+- Animation runtime: clip → parent-local pose → world → skinning palette → CPU skinning
+- Viewport transport bar: clip picker, play/pause/loop, timeline scrubber, live re-skinning, and a
+  real armature overlay (full world transforms, drawn in the current pose)
+- glTF export with skins (joints/weights/inverse-bind matrices) and animation channels
+- `MeshMerger` carries skin bindings across a merge and remaps bone indices into the merged skeleton
 
 ### In Progress
+- **TLOU2 animation clip bitstream** — the container and clip naming are exact; the keyframe payload
+  is measured rather than read from a spec, because no public decoder exists. See below.
 - **Multi-game UI shell + Codex/FModel hybrid** — see `design/ui-mockup.html`. `AssetBrowserView` is single-game;
   the data model already supports many games + a global cross-game search. Add the game rail + cross-game search VM.
 - Note: full-res dict textures are LINEAR (no GOB untile); only the 64×64 embedded thumbnails are tiled (per-submesh
@@ -98,7 +124,8 @@ src/
 ### Planned
 - FBX model export (CUE4Parse-Conversion)
 - Audio playback with waveform (NAudio)
-- Animation viewer with timeline scrubber
+- Cinematic viewer (`CINEMATIC_1` / `CIN_SEQUENCE_1` / `CAMERA_TABLE_1`) — the clip decoder is the
+  prerequisite; the resources are already discovered and named by `NdPakReader`
 - RAGE engine plugin completion (GTA5, RDR2)
 - Full-quality texture loading from `texturedict3/common-dict.pak` (hash-based lookup)
 
@@ -136,6 +163,73 @@ src/
 - Prefer imgFormat == 98 (BC7) for diffuse colour
 - Texture bytes start at: `pages[pageCt-1].FileOffset + pages[pageCt-1].Size + pakOffset`
 - Embedded textures are 64×64 GPU-tiled (NVidia 1D-thin GOB layout); must untile before decoding
+
+### JOINT_HIERARCHY (bind pose)
+Anchor: `jointBase = pageStart + resItemOffset + 20 + ResItemPaddingSz` (the `+20` is unique to this
+resource; GEOMETRY_1 starts straight at the padding).
+- `jointBase+0` u32 boneCount · `+12` **ptr** xformsOffset · `+20` u64 flags · `+28` u64 ukn · `+36` **ptr** namesOffset
+- Xform sub-header at `X = xformsOffset`: `X+18` u16 xformCount · `X+32` u32 headerSize · `X+60` u32 hierarchyOffset
+- Transform array at `X + headerSize`, **stride 48**: `+0` float3 scale (+4 pad) · `+16` float4 quat (x,y,z,**w**) · `+32` float3 position (+4 pad)
+- **The quaternion must be CONJUGATED** and the transform is **PARENT-LOCAL**, not world. Both are
+  proven by the reference's import/export round-trip (`multiplyBones` on load, parent-inverse on save).
+  `NdSkeletonParser` still probes both quaternion readings and picks whichever agrees with the mesh's
+  own skin weights, so a future build that flips the convention self-corrects instead of silently posing wrong.
+- Parenting table at `X + hierarchyOffset + hashesSize` where `hashesSize = u32 @ X + hierarchyOffset + 20`;
+  **stride 16**, four **signed** i32: GroupID, **ParentID** (-1 = root), ChildID, ChainID
+- Name table at `namesOffset`, **stride 16**: `+0` u64 hash, `+8` u64 name offset **relative to the page
+  start** (a raw offset, NOT a pointer fixup)
+- **boneMap** = every joint whose parent chain terminates at joint 0. The transform array is indexed by
+  **rank within boneMap**, not by global joint index — bone `b`'s matrix is `matrixList[boneMap.IndexOf(b)]`.
+  Joints outside boneMap (helpers, `_grp`) get no row; they borrow their chain's transform and are flagged
+  `HasBindTransform = false`. Bone INDICES stay global and dense, which is what the skin table's 10-bit
+  indices address.
+- Bind scale is read but the reference discards it; we keep it only when it is finite and in (1e-4, 100).
+- `GlobalScale = 100` in the Noesis plugin scales bones *and* geometry alike, so a port that keeps
+  geometry in native units must not apply it.
+
+### Skin weights (per submesh)
+The skin-data pointer lives in the SubMeshDesc at **+0x58 or +0x60** — the reference walks a 176-byte
+struct where it sits at +0x58, but the real 192-byte layout inserts 8 bytes somewhere between the
+material pointer (+0x48, confirmed unshifted) and the count block (+0x88, confirmed shifted).
+`NdSkinParser` validates both candidates against the data and uses whichever is self-consistent.
+- skinDesc: `+0x04` u32 max influences/vertex (≤12) · `+0x10` **ptr** index map · `+0x18` **ptr** weight blob
+- index map: `numVerts × { u32 count, u32 byteOffset }`
+- weights at `weightBlob + byteOffset`: **one u32 per influence** — bits 0..21 weight, bits 22..31 bone
+  index. (The reference reads this as `readBits(22)` + `readBits(10)`; Noesis's bit reader is LSB-first
+  and re-aligns on every seek, so the pair is exactly a little-endian u32 and the blob is 4-byte aligned.)
+- Raw weights are normalised per vertex, so no dependence on the encoder's fixed-point scale.
+
+### Base skeletons
+Character part paks carry skin weights but **no joints** — the joints live once in
+`<world>/actor97/<name>-skel.pak`. `NdSkeletonLocator` resolves them by progressively shorter name
+stems (`abby-prisoner-hair` → `abby-prisoner` → `abby`), then falls back to any rig whose bone count
+covers the mesh's highest referenced bone index, ranked by shared name tokens. That fallback is what
+makes NPCs work: they share `base-male-skel.pak` / `base-female-skel.pak` / `base-teen-skel.pak` / etc.
+
+### TLOU2 animation — what is known and what is not
+**Known (exact).** Clips ship in `anim-*.pak`. Resource-type strings are `ANIM`, `ANIM_GROUP` and
+`ANIM_STREAM` (confirmed against a reverse-engineered TLOU2 Remastered runtime SDK, where they are
+ItemIds 0x29 / 0x2A / 0x33 next to JOINT_HIERARCHY at 0x2B). Cinematics appear as `CINEMATIC_1`,
+`CIN_SEQUENCE_1`, `CUTSCENE_DATA` and `CAMERA_TABLE_1`. Each ResItem carries its own name string, so
+enumerating and naming clips is exact and needs no format knowledge.
+
+**Not known.** The keyframe payload. There is no public decoder: `fmt_nd_pak.py` registers itself with
+`-noanims` and contains no animation code, the `nd_pak.bt` template leaves ANIM_GROUP unparsed, and the
+one closed-source tool that emits anims documents its own output as unreliable. Anyone decoding TLOU2
+clips is doing original reverse engineering.
+
+**How `NdAnimParser` handles that.** It does not guess offsets. Rotation tracks are found by what a
+rotation track provably *is* — a run of unit-length float4s whose samples move smoothly — and the same
+continuity test separates joint-major storage from frame-major. Both properties are physical invariants
+of joint animation and neither holds for unrelated bytes (verified: zero false positives across 1 MB of
+random data). When the invariants do not hold — which is what a quantised clip looks like — it decodes
+nothing and reports why, rather than emitting a plausible pose that would be wrong in the viewport.
+
+**Closing the gap.** Run `python tools/nd_anim_probe.py <anim-*.pak>` on real files. It prints every
+resource with its name, annotates each 8-byte header slot (resolvable pointer / float / small int),
+reports unit-quaternion runs and a smallest-three compressed-quaternion probe, and gives per-page byte
+entropy so packed bitstreams are distinguishable from plain tables. That output is the measurement the
+decoder is missing.
 
 ### MATERIAL_TABLE / per-submesh textures (verified vs Ellie paks)
 Each submesh resolves its own material+textures via the `m_material` fixup pointer at **SMD `+0x48`**:
