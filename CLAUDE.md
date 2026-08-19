@@ -260,7 +260,27 @@ detectors. A 16 MB sweep of all three packings takes ~1.8 s; the scan is capped 
 the cap bites. When nothing validates, the parser decodes nothing and reports why, rather than emitting
 a plausible pose that would be wrong in the viewport.
 
-**Closing the gap.** Run `python tools/nd_anim_probe.py <anim-*.pak>` on real files. It prints every
+### Which joint does a track drive? (StringId64)
+Naughty Dog's `StringId64` is plain **FNV-1a-64** (basis `0xCBF29CE484222325`, prime `0x100000001B3`)
+over the raw ASCII name — verified 8/8 against the reference plugin's published type-string table.
+
+That is what makes track→joint attribution *verifiable instead of guessed*. A clip stores tracks in its
+own joint order, which is not the skeleton's global order, so mapping track `j` onto bone `j` lands the
+elbow's rotation on the spine: the character moves convincingly with everything in the wrong place.
+`NdAnimJointMap` instead hashes the bone names from `JOINT_HIERARCHY` and looks for those u64s in the
+anim pak; a matching consecutive run **is** the clip's joint table, and its order is the attribution.
+A 64-bit hash matching a specific bone name is that bone — across a few MB of slots and a few hundred
+bones the chance of one coincidental hit is ~1e-11.
+
+When no table is found the mapping is left **unresolved**, tracks keep `BoneIndex = -1`, and the viewer
+holds the bind pose and says so. Do not reinstate a positional fallback: wrong attribution is far
+harder to spot than no motion.
+
+`JOINT_HIERARCHY`'s name table stores that same hash at `+0x00` of each 16-byte entry, so hashing the
+names we already parsed reproduces it — a free self-check, logged as "joint-name hash self-check N/N".
+
+**Closing the gap.** Run `python tools/nd_anim_probe.py --skel <name>-skel.pak <anim-*.pak>` on real
+files; `--skel` makes it match joint hashes and print the recovered track→joint order. It prints every
 resource with its name, annotates each 8-byte header slot (resolvable pointer / float / small int),
 reports unit-quaternion runs and a smallest-three compressed-quaternion probe, and gives per-page byte
 entropy so packed bitstreams are distinguishable from plain tables. That output is the measurement the

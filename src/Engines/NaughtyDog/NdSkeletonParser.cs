@@ -290,9 +290,22 @@ public static class NdSkeletonParser
         }
 
         if (conv == QuaternionConvention.Conjugated)
+        {
             Log.Info($"NdSkeletonParser[{label}]: {boneCount} bones, {xformCount} transforms, " +
                      $"{boneMap.Count} in boneMap, {boneCount - boneMap.Count} helper joints" +
                      (nonUnitScales > 0 ? $", {nonUnitScales} non-unit bind scales" : ""));
+
+            // Free self-check against real data: each name-table entry pairs a u64 with the
+            // name pointer. If that u64 is the name's StringId64, hashing the names we just
+            // parsed reproduces it — confirming both the hash function and that the name table
+            // is being read at the right offset. It also proves joint hashes are matchable,
+            // which is what lets animation tracks be attributed to specific joints.
+            int verified = NdAnimJointMap.VerifyAgainstNameTable(data, names, skeleton);
+            Log.Info($"NdSkeletonParser[{label}]: joint-name hash self-check {verified}/{boneCount}" +
+                     (verified == boneCount ? " ✓" :
+                      verified == 0 ? " — name-table u64 is not a StringId64 of the name" :
+                                      " — partial, worth investigating"));
+        }
 
         return skeleton;
     }

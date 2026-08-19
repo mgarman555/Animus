@@ -381,6 +381,20 @@ public partial class SkeletalMeshViewerWindow
             ? "  ⚠ tracks were mapped to bones positionally, not by name — verify before trusting."
             : "";
 
+        // An unattributed clip is the one case where playing it is worse than not: the joint
+        // rotations are real, but with no joint table they would land on the wrong bones and
+        // read as convincing motion with everything in the wrong place. Say so plainly.
+        if (!clip.JointMappingResolved)
+        {
+            SetTransportEnabled(false);
+            ApplyRestPose();
+            AnimStatusText.Text =
+                $"{DescribeClip(clip)} — ⚠ this clip's joint table was not found, so there is no way " +
+                "to tell which joint each rotation drives. Holding the bind pose rather than moving " +
+                "the wrong joints. Run tools/nd_anim_probe.py on this pak to close the gap.";
+            return;
+        }
+
         AnimStatusText.Text = $"{DescribeClip(clip)} — {bind}{unbound}{additive}{mapping}";
 
         ApplyPose(0);

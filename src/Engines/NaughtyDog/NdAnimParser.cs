@@ -84,6 +84,8 @@ public static class NdAnimParser
         public int    PackedRunsFound       { get; set; }
         public string PackedFormat          { get; set; } = "none";
         public int    TranslationRunsFound  { get; set; }
+        /// <summary>How the clip's joint table was located, or why it wasn't.</summary>
+        public string JointMapEvidence      { get; set; } = "";
 
         public string Summarise() =>
             $"resources={Resources.Count} " +
@@ -92,6 +94,7 @@ public static class NdAnimParser
             $"dominant={DominantRunCount}×{DominantRunLength} " +
             $"meanStep={(double.IsNaN(MeanAngularStep) ? "n/a" : MeanAngularStep.ToString("F5"))} " +
             $"packedRuns={PackedRunsFound}({PackedFormat}) transRuns={TranslationRunsFound} " +
+            $"jointMap=[{JointMapEvidence}] " +
             $"layout={Layout} clips={ClipsDecoded} — {Outcome}";
     }
 
@@ -215,13 +218,29 @@ public static class NdAnimParser
             FrameCount = frameCount,
         };
 
+        // WHICH joint each track drives, resolved by matching the skeleton's bone-name hashes
+        // against the pak. Mapping track j onto bone j instead would put the elbow's rotation
+        // on the spine — motion that plays convincingly with everything in the wrong place.
+        var jointMap = NdAnimJointMap.Resolve(reader.Data, skeleton, label);
+        report.JointMapEvidence = jointMap.Evidence;
+
         for (int j = 0; j < jointCount; j++)
         {
             var run = group[j];
+
+            int boneIndex = jointMap.Resolved && j < jointMap.TrackToBone.Length
+                ? jointMap.TrackToBone[j]
+                : -1;
+
             var track = new AnimTrack
             {
-                BoneName  = skeleton != null && j < skeleton.Bones.Count ? skeleton.Bones[j].Name : $"joint_{j}",
-                BoneIndex = skeleton != null && j < skeleton.Bones.Count ? j : -1,
+                // An unresolved track keeps a positional placeholder NAME so it is still
+                // listed, but BoneIndex stays -1 so the sampler binds nothing and the
+                // character holds its bind pose instead of moving wrongly.
+                BoneName  = boneIndex >= 0 && skeleton != null
+                    ? skeleton.Bones[boneIndex].Name
+                    : $"joint_{j}",
+                BoneIndex = boneIndex,
             };
             for (int f = 0; f < frameCount; f++)
             {
@@ -236,14 +255,17 @@ public static class NdAnimParser
 
         clips.Add(clip);
         report.ClipsDecoded = 1;
-        report.Outcome = skeleton == null
-            ? $"decoded {jointCount} rotation tracks × {frameCount} frames; joint names are positional " +
-              "because no skeleton was supplied"
-            : $"decoded {jointCount} rotation tracks × {frameCount} frames, mapped positionally onto " +
-              $"'{skeleton.SourceName}' ({skeleton.Bones.Count} bones)" +
-              (jointCount != skeleton.Bones.Count
-                  ? " — track count and bone count differ, so the mapping is unverified"
-                  : "");
+        int bound = clip.Tracks.Count(t => t.BoneIndex >= 0);
+        clip.JointMappingResolved = bound > 0;
+
+        report.Outcome = bound == 0
+            ? $"decoded {jointCount} rotation tracks × {frameCount} frames, but could not work out " +
+              $"which joint each drives ({jointMap.Evidence}). The rotations are left unattached " +
+              "rather than mapped positionally — a wrong attribution plays as convincing motion " +
+              "with every joint in the wrong place, which is harder to spot than no motion."
+            : $"decoded {jointCount} rotation tracks × {frameCount} frames; {bound} attributed to " +
+              $"named joints of '{skeleton?.SourceName}' via {jointMap.Evidence}" +
+              (bound < jointCount ? $" ({jointCount - bound} track(s) unmatched)" : "");
 
         Log.Info($"NdAnimParser[{label}]: {report.Summarise()}");
         return clips;

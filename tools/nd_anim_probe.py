@@ -238,6 +238,83 @@ def _unpack_smallest_three(d, o, bits):
     return q
 
 
+def sid64(name):
+    """Naughty Dog StringId64 — FNV-1a-64 over raw ASCII.
+
+    Verified 8/8 against the reference plugin's published type-string table
+    (JOINT_HIERARCHY, GEOMETRY_1, VRAM_DESC, ANIM_GROUP, MATERIAL_TABLE_1,
+    PAK_LOGIN_TABLE, TEXTURE_TABLE, SPAWNER_GROUP).
+    """
+    h = 0xCBF29CE484222325
+    for b in name.encode("ascii", "ignore"):
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def bone_names_from_skel(path):
+    """Pull joint names out of a *-skel.pak's JOINT_HIERARCHY name table."""
+    d = open(path, "rb").read()
+    pak = Pak(d)
+    if not pak.read():
+        return []
+    joint = next((it for it in pak.items if it[0] == "JOINT_HIERARCHY"), None)
+    if not joint:
+        return []
+    _t, _n, page_start, ri_off, _pi = joint
+    base = page_start + ri_off + pak.pad + 0x14
+    count = u32(d, base)
+    if not (0 < count < 8192):
+        return []
+    names_ptr = pak.fixup(base + 36)
+    if names_ptr is None:
+        return []
+    out = []
+    for b in range(count):
+        o = names_ptr + b * 16
+        if o + 16 > len(d):
+            break
+        out.append(cstr(d, page_start + u64(d, o + 8)))
+    return [n for n in out if n]
+
+
+def joint_hash_table(d, bone_names):
+    """Find the clip's joint table by matching StringId64 hashes of known bone names.
+
+    This is the measurement that turns "which joint does this track drive?" from a guess
+    into a lookup: the order the hashes appear IS the clip's track order.
+    """
+    if not bone_names:
+        return None
+    by_hash = {}
+    for i, n in enumerate(bone_names):
+        by_hash.setdefault(sid64(n), i)
+
+    best = None          # (offset, stride, [bone indices])
+    for stride in (8, 16, 4):
+        off = 0
+        while off + 8 <= len(d):
+            if u64(d, off) not in by_hash:
+                off += 4
+                continue
+            run, seen, at = [], set(), off
+            while at + 8 <= len(d):
+                idx = by_hash.get(u64(d, at))
+                # A joint table names each joint once; a repeat means the run has left the
+                # table and wandered into something that happens to hash.
+                if idx is None or idx in seen:
+                    break
+                seen.add(idx)
+                run.append(idx)
+                at += stride
+            if best is None or len(run) > len(best[2]):
+                best = (off, stride, run)
+            off = max(at, off + 4)
+
+    # Two or three coincidental hits are noise, not a table. Matches NdAnimJointMap's
+    # MinRunLength so the probe and the C# decoder agree on what counts as a find.
+    return best if best is not None and len(best[2]) >= 6 else None
+
+
 def entropy(chunk):
     if not chunk:
         return 0.0
@@ -286,6 +363,19 @@ def probe(path):
 
     types = Counter(t for t, *_ in pak.items)
     print(f"  types: {', '.join(f'{v}×{k}' for k, v in types.most_common(20))}")
+
+    if BONE_NAMES:
+        hit = joint_hash_table(d, BONE_NAMES)
+        if hit:
+            off, stride, order = hit
+            print(f"  JOINT TABLE: {len(order)} joint-name hashes at 0x{off:X} (stride {stride})")
+            named = [BONE_NAMES[i] for i in order]
+            print(f"    track order: {', '.join(named[:16])}"
+                  + (f" … (+{len(named)-16} more)" if len(named) > 16 else ""))
+            print("    ^ this is the clip's track -> joint mapping; feed it to NdAnimJointMap")
+        else:
+            print(f"  JOINT TABLE: none of the {len(BONE_NAMES)} bone-name hashes appear in this pak")
+            print("    (try a different -skel.pak, or the joint table may be indices not hashes)")
 
     anims = [it for it in pak.items if it[0] in ANIM_TYPES]
     cines = [it for it in pak.items if it[0] in CINEMATIC_TYPES]
@@ -341,8 +431,31 @@ def probe(path):
         print(f"\n  after-pages boundary=0x{boundary:X}  trailing bytes={len(d) - boundary:,}")
 
 
+BONE_NAMES = []
+
+
 def main():
+    global BONE_NAMES
     args = sys.argv[1:]
+    if not args:
+        print(__doc__)
+        return 1
+
+    # --skel <path>: load a skeleton's joint names so the probe can match their
+    # StringId64 hashes inside the anim pak and recover the track -> joint mapping.
+    if "--skel" in args:
+        i = args.index("--skel")
+        if i + 1 >= len(args):
+            print("--skel needs a path to a *-skel.pak")
+            return 1
+        skel_path = args[i + 1]
+        del args[i:i + 2]
+        try:
+            BONE_NAMES = bone_names_from_skel(skel_path)
+            print(f"loaded {len(BONE_NAMES)} joint names from {os.path.basename(skel_path)}")
+        except Exception as e:
+            print(f"could not read {skel_path}: {type(e).__name__}: {e}")
+
     if not args:
         print(__doc__)
         return 1

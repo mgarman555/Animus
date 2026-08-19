@@ -328,6 +328,13 @@ public class AnimationAssetData : AssetData
 
     /// <summary>Joint names the clip animates, in the clip's own order (diagnostic).</summary>
     public List<string> JointNames { get; set; } = new();
+
+    /// <summary>
+    /// True when each track is known to drive a specific named joint. False means the tracks
+    /// were recovered but not attributed, so playing the clip would move the wrong joints —
+    /// the viewer holds the bind pose and says so instead.
+    /// </summary>
+    public bool JointMappingResolved { get; set; }
 }
 
 public class AnimTrack
