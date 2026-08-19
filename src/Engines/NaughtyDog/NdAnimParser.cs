@@ -35,8 +35,20 @@ namespace GameAssetExplorer.Engines.NaughtyDog;
 /// </summary>
 public static class NdAnimParser
 {
-    /// <summary>Shortest run of samples accepted as a track.</summary>
+    /// <summary>Shortest run of samples accepted as an uncompressed track.</summary>
     private const int MinTrackSamples = 4;
+
+    /// <summary>
+    /// Compressed quaternions are unit-length by construction, so smoothness is the ONLY
+    /// evidence available and the run has to be longer before it counts.
+    /// </summary>
+    private const int MinPackedSamples = 12;
+
+    /// <summary>Mean angular step (radians) a packed run must stay under to read as a track.</summary>
+    private const double PackedMaxMeanStep = 0.05;
+
+    /// <summary>Shortest run of samples accepted as a translation track.</summary>
+    private const int MinTranslationSamples = 12;
 
     /// <summary>How far from unit length a quaternion may be and still count.</summary>
     private const float UnitTolerance = 2e-3f;
@@ -69,6 +81,9 @@ public static class NdAnimParser
         public string Layout                { get; set; } = "undetermined";
         public string Outcome               { get; set; } = "not attempted";
         public int    ClipsDecoded          { get; set; }
+        public int    PackedRunsFound       { get; set; }
+        public string PackedFormat          { get; set; } = "none";
+        public int    TranslationRunsFound  { get; set; }
 
         public string Summarise() =>
             $"resources={Resources.Count} " +
@@ -76,6 +91,7 @@ public static class NdAnimParser
             $"quatRuns={QuaternionRunsFound} longest={LongestRun} " +
             $"dominant={DominantRunCount}×{DominantRunLength} " +
             $"meanStep={(double.IsNaN(MeanAngularStep) ? "n/a" : MeanAngularStep.ToString("F5"))} " +
+            $"packedRuns={PackedRunsFound}({PackedFormat}) transRuns={TranslationRunsFound} " +
             $"layout={Layout} clips={ClipsDecoded} — {Outcome}";
     }
 
@@ -125,10 +141,23 @@ public static class NdAnimParser
 
         if (runs.Count == 0)
         {
-            report.Outcome = "no uncompressed rotation tracks present — clip payload is quantised, " +
-                             "and its bit layout is not yet measured (run tools/nd_anim_probe.py on this pak)";
-            Log.Info($"NdAnimParser[{label}]: {report.Summarise()}");
-            return clips;
+            // Nothing stored as plain float quaternions. Before giving up, try the packing
+            // joint animation is usually quantised with: a 2-bit index naming the dropped
+            // (largest) component, then three signed fixed-point components. Those decode to
+            // unit quaternions by construction, so smoothness across samples is the only
+            // evidence — which is why the run has to be longer and steadier to count.
+            runs = FindPackedRuns(reader.Data, out string packedFormat);
+            report.PackedRunsFound = runs.Count;
+            report.PackedFormat    = packedFormat;
+
+            if (runs.Count == 0)
+            {
+                report.Outcome = "no rotation tracks found, uncompressed or in the usual quantised " +
+                                 "packings — this clip's bit layout is not yet measured " +
+                                 "(run tools/nd_anim_probe.py on this pak and feed the result back)";
+                Log.Info($"NdAnimParser[{label}]: {report.Summarise()}");
+                return clips;
+            }
         }
 
         // Group by run length: a clip's tracks all share one length, so the modal length is
@@ -169,6 +198,8 @@ public static class NdAnimParser
             Log.Info($"NdAnimParser[{label}]: {report.Summarise()}");
             return clips;
         }
+
+        report.TranslationRunsFound = CountTranslationRuns(reader.Data, frameCount);
 
         // One clip per animation resource is the common case; when a pak holds several
         // resources but only one coherent track set, attribute it to the first resource and
@@ -331,6 +362,196 @@ public static class NdAnimParser
         BitConverter.ToSingle(d, o + 4),
         BitConverter.ToSingle(d, o + 8),
         BitConverter.ToSingle(d, o + 12));
+
+    // ── Quantised rotation tracks ────────────────────────────────────────────
+
+    /// <summary>One "smallest three" packing to try.</summary>
+    private readonly record struct PackedFormat(string Name, int ByteStride, int ComponentBits);
+
+    /// <summary>
+    /// The packings joint animation is realistically quantised with. Each stores a 2-bit index
+    /// naming the component that was dropped (always the largest, so the remaining three are
+    /// each within ±1/√2) followed by three signed fixed-point components.
+    /// </summary>
+    private static readonly PackedFormat[] PackedFormats =
+    {
+        new("48-bit (3×15)", 6, 15),
+        new("64-bit (3×20)", 8, 20),
+        new("32-bit (3×10)", 4, 10),
+    };
+
+    /// <summary>
+    /// Scan for continuous runs of packed quaternions, trying each candidate packing and
+    /// keeping the one that yields the most track-like data. Returns runs whose samples are
+    /// already decoded, so the caller treats them exactly like uncompressed ones.
+    /// </summary>
+    private static List<QuatRun> FindPackedRuns(byte[] data, out string formatName)
+    {
+        var best = new List<QuatRun>();
+        formatName = "none";
+
+        foreach (var fmt in PackedFormats)
+        {
+            if (data.Length > PackedScanByteCap)
+                Log.Info($"NdAnimParser: packed scan ({fmt.Name}) covers the first " +
+                         $"{PackedScanByteCap / (1 << 20)} MB of {data.Length / (1 << 20)} MB");
+            var found = ScanPacked(data, fmt);
+            // Prefer the packing that explains the most samples, not merely the most runs —
+            // a format that misreads produces many short runs, not a few long ones.
+            if (found.Sum(r => r.Count) > best.Sum(r => r.Count))
+            {
+                best = found;
+                formatName = fmt.Name;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// How much of a pak the packed scan will sweep. Finding the packing only needs a
+    /// representative slice, and sweeping every alignment of a several-hundred-megabyte anim
+    /// pak three times over is not worth the wait. When the cap bites it is logged, never
+    /// silently applied.
+    /// </summary>
+    private const int PackedScanByteCap = 64 << 20;
+
+    private static List<QuatRun> ScanPacked(byte[] data, PackedFormat fmt)
+    {
+        var runs = new List<QuatRun>();
+        int stride = fmt.ByteStride;
+        int scanEnd = Math.Min(data.Length, PackedScanByteCap);
+        int limit = scanEnd - stride * MinPackedSamples;
+        if (limit <= 0) return runs;
+
+        // Step by the stride so a run is only found at its true alignment; the outer walk
+        // advances 4 bytes at a time so every plausible alignment is still visited.
+        for (int start = 0; start < limit; start += 4)
+        {
+            int count = 0;
+            double stepSum = 0;
+            Quaternion prev = default;
+            var samples = new List<Quaternion>();
+
+            for (int k = 0; ; k++)
+            {
+                int o = start + k * stride;
+                if (o + stride > data.Length) break;
+                var q = UnpackSmallestThree(data, o, fmt);
+                if (q is null) break;
+
+                if (k > 0)
+                {
+                    double step = AngleBetween(prev, q.Value);
+                    // A single discontinuity ends the run rather than averaging away.
+                    if (step > PackedMaxMeanStep * 4) break;
+                    stepSum += step;
+                }
+                prev = q.Value;
+                samples.Add(q.Value);
+                count++;
+            }
+
+            if (count >= MinPackedSamples && stepSum / (count - 1) <= PackedMaxMeanStep)
+            {
+                runs.Add(new QuatRun
+                {
+                    Offset   = start,
+                    Count    = count,
+                    MeanStep = stepSum / (count - 1),
+                    Samples  = samples.ToArray(),
+                });
+                start += count * stride - 4;   // skip past what we just consumed
+            }
+        }
+
+        return runs;
+    }
+
+    /// <summary>
+    /// Decode one packed quaternion, or null when the bits cannot represent one (the three
+    /// stored components summing past unit length is the giveaway, and it is what rules out
+    /// most unrelated bytes).
+    /// </summary>
+    private static Quaternion? UnpackSmallestThree(byte[] d, int o, PackedFormat fmt)
+    {
+        if (o + fmt.ByteStride > d.Length) return null;
+
+        ulong raw = 0;
+        for (int i = 0; i < fmt.ByteStride; i++) raw |= (ulong)d[o + i] << (8 * i);
+
+        int dropped = (int)(raw & 0x3);
+        ulong mask = (1UL << fmt.ComponentBits) - 1;
+        Span<float> comps = stackalloc float[3];
+        int shift = 2;
+        float sumSq = 0;
+
+        for (int i = 0; i < 3; i++)
+        {
+            ulong v = (raw >> shift) & mask;
+            shift += fmt.ComponentBits;
+            float c = (float)((double)v / mask) * 2f - 1f;
+            comps[i] = c;
+            sumSq += c * c;
+        }
+
+        if (sumSq > 1f) return null;
+        float missing = MathF.Sqrt(1f - sumSq);
+
+        return dropped switch
+        {
+            0 => new Quaternion(missing,  comps[0], comps[1], comps[2]),
+            1 => new Quaternion(comps[0], missing,  comps[1], comps[2]),
+            2 => new Quaternion(comps[0], comps[1], missing,  comps[2]),
+            _ => new Quaternion(comps[0], comps[1], comps[2], missing),
+        };
+    }
+
+    // ── Translation tracks ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Count runs of float3s that behave like a translation track: finite, at a physically
+    /// plausible magnitude for a character rig, and moving smoothly. Reported rather than
+    /// decoded — until a clip's joint ordering is known, an unattributed position track cannot
+    /// be assigned to a bone, and guessing would move the wrong joint.
+    /// </summary>
+    private static int CountTranslationRuns(byte[] data, int expectedFrames)
+    {
+        const float MaxCoord = 100f;      // metres; a character rig lives well inside this
+        const float MaxStep  = 0.5f;      // metres between consecutive frames
+        int runs = 0;
+        int limit = data.Length - 12;
+
+        for (int start = 0; start < limit; start += 4)
+        {
+            int count = 0;
+            Vector3 prev = default;
+
+            for (int k = 0; ; k++)
+            {
+                int o = start + k * 12;
+                if (o + 12 > data.Length) break;
+                float x = BitConverter.ToSingle(data, o);
+                float y = BitConverter.ToSingle(data, o + 4);
+                float z = BitConverter.ToSingle(data, o + 8);
+                if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z)) break;
+                if (MathF.Abs(x) > MaxCoord || MathF.Abs(y) > MaxCoord || MathF.Abs(z) > MaxCoord) break;
+
+                var v = new Vector3(x, y, z);
+                if (k > 0 && (v - prev).Length() > MaxStep) break;
+                prev = v;
+                count++;
+            }
+
+            if (count >= Math.Max(MinTranslationSamples, Math.Min(expectedFrames, 64)))
+            {
+                runs++;
+                start += count * 12 - 4;
+            }
+        }
+
+        return runs;
+    }
 
     /// <summary>
     /// Look for the clip's frame rate in its header. ND clips run at 30 fps, so a float in a

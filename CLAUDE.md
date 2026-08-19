@@ -218,12 +218,23 @@ enumerating and naming clips is exact and needs no format knowledge.
 one closed-source tool that emits anims documents its own output as unreliable. Anyone decoding TLOU2
 clips is doing original reverse engineering.
 
-**How `NdAnimParser` handles that.** It does not guess offsets. Rotation tracks are found by what a
-rotation track provably *is* — a run of unit-length float4s whose samples move smoothly — and the same
-continuity test separates joint-major storage from frame-major. Both properties are physical invariants
-of joint animation and neither holds for unrelated bytes (verified: zero false positives across 1 MB of
-random data). When the invariants do not hold — which is what a quantised clip looks like — it decodes
-nothing and reports why, rather than emitting a plausible pose that would be wrong in the viewport.
+**How `NdAnimParser` handles that.** It does not guess offsets — it looks for what a rotation track
+provably *is*, at every 4-byte alignment, in two passes:
+1. **Uncompressed** — a run of unit-length float4s whose samples move smoothly. Both properties are
+   physical invariants of joint animation and neither holds for unrelated bytes.
+2. **Quantised** — the "smallest three" packing (2-bit index naming the dropped largest component, then
+   three signed fixed-point components) at 48-bit/3×15, 64-bit/3×20 and 32-bit/3×10. These decode to
+   unit quaternions by construction, so smoothness is the only evidence and the bar is higher: longer
+   minimum runs and a tighter step threshold. The packing that explains the most samples wins.
+
+The same continuity test separates joint-major storage from frame-major. Translation-track candidates
+are counted and reported but not decoded — without a known joint ordering an unattributed position
+track cannot be assigned to a bone, and guessing would move the wrong joint.
+
+Measured on random data: **zero false positives across 16 MB** for both the uncompressed and quantised
+detectors. A 16 MB sweep of all three packings takes ~1.8 s; the scan is capped at 64 MB and logs when
+the cap bites. When nothing validates, the parser decodes nothing and reports why, rather than emitting
+a plausible pose that would be wrong in the viewport.
 
 **Closing the gap.** Run `python tools/nd_anim_probe.py <anim-*.pak>` on real files. It prints every
 resource with its name, annotates each 8-byte header slot (resolvable pointer / float / small int),
