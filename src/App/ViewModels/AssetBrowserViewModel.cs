@@ -2,6 +2,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using GameAssetExplorer.Core.Interfaces;
 using GameAssetExplorer.Core.Models;
+using GameAssetExplorer.Core.Services;
 using GameAssetExplorer.Core.Utilities;
 using GameAssetExplorer.Engines.NaughtyDog;
 using GameAssetExplorer.Engines.SotrEngine;
@@ -102,9 +103,27 @@ public partial class AssetBrowserViewModel : ObservableObject
     /// <summary>Fired when the user clicks the back arrow — navigate back to the home screen.</summary>
     public event EventHandler? BackRequested;
 
-    public AssetBrowserViewModel(IGameEngine engine, GameConfig config)
+    /// <summary>Raised when the game rail is used to switch to another mounted game.</summary>
+    public event EventHandler<MountedGame>? SwitchGameRequested;
+
+    private readonly GameSession? _session;
+
+    /// <summary>Games mounted alongside this one, for the rail. Empty when there is no session.</summary>
+    public IReadOnlyList<MountedGame> MountedGames => _session?.Games ?? Array.Empty<MountedGame>();
+
+    /// <summary>Show the rail only once there is more than one game to switch between.</summary>
+    public bool ShowGameRail => MountedGames.Count > 1;
+
+    /// <summary>Cross-game search results; empty unless <see cref="SearchAllGames"/> is on.</summary>
+    public ObservableCollection<SearchHit> GlobalResults { get; } = new();
+
+    [ObservableProperty]
+    private bool searchAllGames;
+
+    public AssetBrowserViewModel(IGameEngine engine, GameConfig config, GameSession? session = null)
     {
         _engine = engine;
+        _session = session;
         _gameConfig = config;
 
         // Hook into NaughtyDog background texture-dictionary build so it shows in the status bar
@@ -130,10 +149,58 @@ public partial class AssetBrowserViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private async Task GoBack()
+    private Task GoBack()
     {
-        await _engine.UnmountGameAsync();
+        // Deliberately NOT unmounting: the session keeps this game loaded so returning to it
+        // costs nothing. Closing a game is an explicit action on the rail.
         BackRequested?.Invoke(this, EventArgs.Empty);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Switch the browser to another mounted game.</summary>
+    [RelayCommand]
+    private void SwitchGame(MountedGame? game)
+    {
+        if (game == null || _session == null) return;
+        SwitchGameRequested?.Invoke(this, game);
+    }
+
+    /// <summary>Unmount one game and drop it from the rail.</summary>
+    [RelayCommand]
+    private async Task CloseGame(MountedGame? game)
+    {
+        if (game == null || _session == null) return;
+        await _session.RemoveAsync(game);
+        OnPropertyChanged(nameof(MountedGames));
+        OnPropertyChanged(nameof(ShowGameRail));
+    }
+
+    /// <summary>
+    /// Re-run the cross-game search. Kept separate from the per-game filter so turning the
+    /// toggle off leaves the normal in-game filtering exactly as it was.
+    /// </summary>
+    private void RefreshGlobalSearch()
+    {
+        GlobalResults.Clear();
+        if (!SearchAllGames || _session == null || string.IsNullOrWhiteSpace(SearchFilter)) return;
+
+        foreach (var hit in _session.SearchAll(SearchFilter))
+            GlobalResults.Add(hit);
+
+        StatusMessage = GlobalResults.Count == 0
+            ? $"No matches for '{SearchFilter}' in {_session.Games.Count} mounted game(s)."
+            : $"{GlobalResults.Count:N0} match(es) across {GlobalResults.Select(h => h.Game).Distinct().Count()} game(s).";
+    }
+
+    partial void OnSearchAllGamesChanged(bool value) => RefreshGlobalSearch();
+
+    /// <summary>
+    /// The per-game filter and the cross-game search share one text box, so typing has to
+    /// drive whichever mode is active.
+    /// </summary>
+    private void OnSearchFilterChangedForGlobal()
+    {
+        if (SearchAllGames) RefreshGlobalSearch();
     }
 
     // ─── Initialization ───────────────────────────────────────────────────────
@@ -147,6 +214,15 @@ public partial class AssetBrowserViewModel : ObservableObject
         {
             var allAssets = await _engine.GetAllAssetsAsync();
             _allAssets = allAssets;
+
+            // Join the session once the asset index exists — that is what cross-game search
+            // reads, and what puts this game on the rail.
+            if (_session != null)
+            {
+                _session.Add(_gameConfig, _engine, allAssets);
+                OnPropertyChanged(nameof(MountedGames));
+                OnPropertyChanged(nameof(ShowGameRail));
+            }
 
             // Build the tree + type groups off the UI thread (860k-file games would otherwise
             // freeze the window for the whole build), then assign on the UI thread.
@@ -179,7 +255,11 @@ public partial class AssetBrowserViewModel : ObservableObject
     // Assets currently visible based on folder-tree selection (before search filter)
     private IReadOnlyList<AssetInfo> _folderScope = Array.Empty<AssetInfo>();
 
-    partial void OnSearchFilterChanged(string value) => ApplyFilter();
+    partial void OnSearchFilterChanged(string value)
+    {
+        ApplyFilter();
+        OnSearchFilterChangedForGlobal();
+    }
     partial void OnFilterTypeChanged(AssetType value) => ApplyFilter();
 
     private void ApplyFilter()

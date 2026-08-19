@@ -92,6 +92,8 @@ src/
 
 ### Working
 - Game library home screen (add/disable/remove games)
+- Several games mounted at once (`GameSession`): game rail to switch instantly, cross-game search
+  ranked name-exact → name-prefix → name-substring → path; going Back no longer unmounts
 - Auto-detect UE version from game directory
 - Mount UE4/UE5 `.pak` / `.utoc/.ucas` archives with AES decryption
 - Full virtual asset tree browsing
@@ -116,8 +118,9 @@ src/
 ### In Progress
 - **TLOU2 animation clip bitstream** — the container and clip naming are exact; the keyframe payload
   is measured rather than read from a spec, because no public decoder exists. See below.
-- **Multi-game UI shell + Codex/FModel hybrid** — see `design/ui-mockup.html`. `AssetBrowserView` is single-game;
-  the data model already supports many games + a global cross-game search. Add the game rail + cross-game search VM.
+- **Multi-game UI shell** — `GameSession` keeps several games mounted at once; the browser has a game
+  rail (badge per game, click to switch) and an "All games" toggle that searches every mounted game.
+  Still to do from `design/ui-mockup.html`: the asset *grid* view and thumbnail cards.
 - Note: full-res dict textures are LINEAR (no GOB untile); only the 64×64 embedded thumbnails are tiled (per-submesh
   decode in the viewer forces skip-untile for that reason)
 
