@@ -154,6 +154,46 @@ public class RageEnginePlugin : IGameEngine
 
         var rawData = await Task.Run(() => reader.ExtractFile(match.Entry));
 
+        // .ytd is a texture dictionary — an RSC7 resource holding many textures. Return the
+        // first (or the one whose name matches the asset) as the previewable texture, and list
+        // the rest in the properties so the dictionary's contents are visible.
+        if (Path.GetExtension(asset.VirtualPath).Equals(".ytd", StringComparison.OrdinalIgnoreCase))
+        {
+            var textures = await Task.Run(() => YtdReader.Read(rawData, asset.Name));
+            if (textures.Count > 0)
+            {
+                var pick = textures.FirstOrDefault(t =>
+                               t.Name.Equals(asset.Name, StringComparison.OrdinalIgnoreCase))
+                           ?? textures[0];
+
+                var tex = new TextureAssetData
+                {
+                    Info         = asset,
+                    Width        = pick.Width,
+                    Height       = pick.Height,
+                    SourceFormat = pick.Format,
+                    IsSrgb       = !pick.Name.Contains("_n", StringComparison.OrdinalIgnoreCase),
+                    Mips         = pick.Mips,
+                    RawProperties = new Dictionary<string, object?>
+                    {
+                        ["_Archive"]  = Path.GetFileName(match.Archive),
+                        ["Width"]     = pick.Width,
+                        ["Height"]    = pick.Height,
+                        ["Format"]    = pick.Format,
+                        ["MipLevels"] = pick.Levels,
+                        ["Textures"]  = textures.Count,
+                    },
+                };
+
+                for (int i = 0; i < textures.Count; i++)
+                    tex.RawProperties[$"Texture[{i}]"] =
+                        $"{textures[i].Name}  {textures[i].Width}×{textures[i].Height}  " +
+                        $"{textures[i].Format}  ({textures[i].Levels} mips)";
+
+                return tex;
+            }
+        }
+
         return new RageRawAssetData
         {
             Info       = asset,

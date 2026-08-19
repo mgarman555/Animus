@@ -126,8 +126,30 @@ src/
 - Audio playback with waveform (NAudio)
 - Cinematic viewer (`CINEMATIC_1` / `CIN_SEQUENCE_1` / `CAMERA_TABLE_1`) — the clip decoder is the
   prerequisite; the resources are already discovered and named by `NdPakReader`
-- RAGE engine plugin completion (GTA5, RDR2)
+- RAGE engine: .ydr/.ydd/.yft drawables (the RSC7 container + .ytd textures now work)
 - Full-quality texture loading from `texturedict3/common-dict.pak` (hash-based lookup)
+
+---
+
+## RAGE (GTA5 / RDR2) — RSC7 resources
+
+Every `.ytd`/`.ydr`/`.ydd`/`.yft` is an **RSC7 resource**, not a flat file:
+- Header (uncompressed): `+0` magic `0x37435352`, `+4` version, `+8` systemFlags, `+12` graphicsFlags
+- Everything after byte 16 is **one raw DEFLATE stream** inflating to the system segment
+  followed by the graphics segment
+- Segment sizes come from `RageResource.GetSizeFromFlags` — nine bit-fields of page counts at
+  different multipliers times a base of `0x200 << (flags & 0xF)`. The field widths are not
+  guessable; they are taken verbatim from CodeWalker. Sizes are **page granular**, so a
+  80-byte payload still occupies a 512-byte page.
+- Pointers are **virtual addresses**: top nibble 5 = system segment, 6 = graphics segment, low
+  28 bits = offset. A resource can never be read as a flat buffer.
+
+`.ytd` texture dictionary (`YtdReader`):
+- Dictionary at system+0: `+0x30` texture-list pointer, `+0x38` u16 count → array of u64
+- Texture (144 bytes): `+0x28` name ptr · `+0x50` w · `+0x52` h · `+0x58` format (D3DFMT/FourCC)
+  · `+0x5D` mip levels · `+0x70` pixel-data ptr (graphics segment)
+- Mips are contiguous; block formats round **up to whole 4×4 blocks**, so a 1×1 BC1 mip still
+  costs 8 bytes. Walking the chain with unrounded sizes shifts every mip after the first.
 
 ---
 
