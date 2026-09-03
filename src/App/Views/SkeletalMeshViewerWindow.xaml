@@ -12,6 +12,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="44"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Title bar -->
@@ -307,5 +308,109 @@
                 </Grid>
             </Border>
         </Grid>
+
+        <!-- ── Animation transport ────────────────────────────────────────── -->
+        <Border Grid.Row="2"
+                x:Name="AnimBar"
+                Background="#252526"
+                BorderBrush="#3F3F46"
+                BorderThickness="0,1,0,0"
+                Visibility="Collapsed">
+            <Grid Margin="12,8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0"
+                           Text="Clip"
+                           FontSize="11" Foreground="#777777"
+                           VerticalAlignment="Center"
+                           Margin="0,0,6,0"/>
+
+                <ComboBox Grid.Row="0" Grid.Column="1"
+                          x:Name="AnimClipCombo"
+                          Width="240"
+                          FontSize="11"
+                          Background="#2D2D30"
+                          Foreground="#CCCCCC"
+                          BorderBrush="#3F3F46"
+                          VerticalAlignment="Center"
+                          SelectionChanged="OnAnimClipChanged"/>
+
+                <Button Grid.Row="0" Grid.Column="2"
+                        x:Name="BtnPlayPause"
+                        Content="▶"
+                        Width="34" Padding="0,3"
+                        FontSize="12"
+                        Margin="8,0,8,0"
+                        Background="#2D2D30"
+                        Foreground="#CCCCCC"
+                        BorderBrush="#3F3F46"
+                        BorderThickness="1"
+                        Cursor="Hand"
+                        IsEnabled="False"
+                        VerticalAlignment="Center"
+                        Click="OnPlayPause"/>
+
+                <Slider Grid.Row="0" Grid.Column="3"
+                        x:Name="AnimSlider"
+                        Minimum="0" Maximum="1" Value="0"
+                        IsEnabled="False"
+                        VerticalAlignment="Center"
+                        ValueChanged="OnAnimSliderChanged"/>
+
+                <TextBlock Grid.Row="0" Grid.Column="4"
+                           x:Name="AnimFrameText"
+                           Text="—"
+                           FontSize="11" Foreground="#AAAAAA"
+                           VerticalAlignment="Center"
+                           MinWidth="96"
+                           TextAlignment="Right"
+                           Margin="10,0,10,0"/>
+
+                <CheckBox Grid.Row="0" Grid.Column="5"
+                          x:Name="ChkLoop"
+                          Content="Loop"
+                          FontSize="11"
+                          Foreground="#CCCCCC"
+                          IsChecked="True"
+                          VerticalAlignment="Center"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0"
+                           Text="Rig"
+                           FontSize="11" Foreground="#777777"
+                           VerticalAlignment="Center"
+                           Margin="0,6,6,0"/>
+
+                <ComboBox Grid.Row="1" Grid.Column="1"
+                          x:Name="SkeletonCombo"
+                          Width="240"
+                          FontSize="11"
+                          Background="#2D2D30"
+                          Foreground="#CCCCCC"
+                          BorderBrush="#3F3F46"
+                          VerticalAlignment="Center"
+                          Margin="0,6,0,0"
+                          ToolTip="Which skeleton drives this mesh. Auto-resolution can only check that a rig has enough bones — override it here if the deformation looks wrong."
+                          SelectionChanged="OnSkeletonChanged"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="2" Grid.ColumnSpan="4"
+                           x:Name="AnimStatusText"
+                           Text=""
+                           FontSize="10" Foreground="#777777"
+                           TextWrapping="Wrap"
+                           VerticalAlignment="Center"
+                           Margin="10,6,0,0"/>
+            </Grid>
+        </Border>
     </Grid>
 </Window>

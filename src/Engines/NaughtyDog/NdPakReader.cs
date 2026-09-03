@@ -13,6 +13,15 @@ public class NdPakReader
 {
     public enum NdGame { U4, TLL, TLOU2, TLOUP1, Unknown }
 
+    /// <summary>
+    /// Stride of one SubMeshDesc in a TLOU2 PC pak. The Noesis reference walks 176; the real
+    /// layout is 192, verified by scanning contiguous valid descriptors across the Ellie paks
+    /// (the vertex/index count fields sit +8 from where the 176 walk puts them). Every walk of
+    /// the descriptor table must use THIS constant — a stale 176 elsewhere builds a garbage
+    /// address map and whatever depends on it fails silently.
+    /// </summary>
+    public const int SubMeshDescStride = 192;
+
     /// <summary>One entry in the pak's page table — { fileOffset, size, flags }.</summary>
     public readonly record struct PageEntry(uint FileOffset, uint Size, uint Flags);
 
@@ -50,6 +59,27 @@ public class NdPakReader
 
     /// <summary>First JOINT_HIERARCHY record found, or null.</summary>
     public PakEntry? JointEntry { get; private set; }
+
+    /// <summary>
+    /// Every animation-bearing record in the pak, in file order. Naughty Dog ships clips in
+    /// dedicated <c>anim-*.pak</c> files; the resource-type strings are ANIM, ANIM_GROUP and
+    /// ANIM_STREAM (verified against the reverse-engineered runtime SDK's ItemId enum, where
+    /// they are 0x29 / 0x2A / 0x33 alongside JOINT_HIERARCHY at 0x2B).
+    /// </summary>
+    public List<PakEntry> AnimEntries { get; } = new();
+
+    /// <summary>
+    /// Cinematic / cutscene records — the eventual target of this work. Discovered and named
+    /// here so they show up in the browser even before their payloads are decoded.
+    /// </summary>
+    public List<PakEntry> CinematicEntries { get; } = new();
+
+    /// <summary>Resource-type strings that carry joint animation.</summary>
+    public static readonly string[] AnimTypes = { "ANIM", "ANIM_GROUP", "ANIM_STREAM" };
+
+    /// <summary>Resource-type strings that describe cinematics/cutscenes.</summary>
+    public static readonly string[] CinematicTypes =
+        { "CINEMATIC_1", "CIN_SEQUENCE_1", "CUTSCENE_DATA", "CAMERA_TABLE_1" };
 
     /// <summary>VRAM_DESC records keyed by their texture hash (uint64 at +56 inside the desc).</summary>
     public Dictionary<ulong, PakEntry> VramByHash { get; } = new();
@@ -166,6 +196,8 @@ public class NdPakReader
         // ── Walk every page's header to enumerate ResItems ───────────────────
         Entries.Clear();
         VramByHash.Clear();
+        AnimEntries.Clear();
+        CinematicEntries.Clear();
         GeoEntry   = null;
         JointEntry = null;
 
@@ -241,6 +273,19 @@ public class NdPakReader
                 JointEntry ??= entry;
                 break;
 
+            case "ANIM":
+            case "ANIM_GROUP":
+            case "ANIM_STREAM":
+                AnimEntries.Add(entry);
+                break;
+
+            case "CINEMATIC_1":
+            case "CIN_SEQUENCE_1":
+            case "CUTSCENE_DATA":
+            case "CAMERA_TABLE_1":
+                CinematicEntries.Add(entry);
+                break;
+
             case "VRAM_DESC":
             {
                 int descBase = entry.PageStart + entry.ResItemOffset;
@@ -298,7 +343,7 @@ public class NdPakReader
     /// </summary>
     public void LogDiagnostics(string label)
     {
-        Log.Info($"NdPakReader[{label}]: magic=0x{Magic:X}  game={Game}  pages={Pages.Count}  fixups={PointerFixups.Count}  resItems={Entries.Count}  vrams={VramByHash.Count}  geo={(GeoEntry != null)}  joint={(JointEntry != null)}");
+        Log.Info($"NdPakReader[{label}]: magic=0x{Magic:X}  game={Game}  pages={Pages.Count}  fixups={PointerFixups.Count}  resItems={Entries.Count}  vrams={VramByHash.Count}  geo={(GeoEntry != null)}  joint={(JointEntry != null)}  anims={AnimEntries.Count}  cinematics={CinematicEntries.Count}");
 
         // Counts per type
         var byType = Entries.GroupBy(e => e.Type)

@@ -46,12 +46,24 @@ public static class MeshMerger
         bool isSkeletal = valid.Any(m => m.IsSkeletal);
 
         // ── Build the merged skeleton (if applicable) ─────────────────────────
+        // boneRemap[i] maps valid[i]'s bone indices into the merged skeleton's index space.
+        // Null means "this mesh contributed no skeleton", in which case its skin table (if
+        // any) cannot be carried across and is dropped rather than silently mis-indexed.
         SkeletonData? mergedSkeleton = null;
+        var boneRemap = new int[]?[valid.Count];
+
         if (isSkeletal && settings.MergeSkeletons)
         {
-            mergedSkeleton = MergeSkeletons(valid.Where(m => m.Skeleton != null)
-                                                  .Select(m => m.Skeleton!)
-                                                  .ToList());
+            var withSkeletons = valid.Select((m, i) => (Mesh: m, Index: i))
+                                     .Where(x => x.Mesh.Skeleton != null)
+                                     .ToList();
+
+            mergedSkeleton = MergeSkeletons(
+                withSkeletons.Select(x => x.Mesh.Skeleton!).ToList(),
+                out var remaps);
+
+            for (int k = 0; k < withSkeletons.Count; k++)
+                boneRemap[withSkeletons[k].Index] = remaps[k];
         }
 
         // ── Merge material slots ──────────────────────────────────────────────
@@ -83,7 +95,7 @@ public static class MeshMerger
 
         for (int lodIdx = 0; lodIdx < numLods; lodIdx++)
         {
-            var lod = MergeLod(valid, lodIdx, settings);
+            var lod = MergeLod(valid, boneRemap, lodIdx, settings);
             if (lod != null) mergedLods.Add(lod);
         }
 
@@ -122,40 +134,58 @@ public static class MeshMerger
 
     private static LodData? MergeLod(
         IReadOnlyList<MeshAssetData> meshes,
+        int[]?[] boneRemap,
         int lodIndex,
         MeshMergeSettings settings)
     {
-        // For each mesh, use the requested LOD or fall back to the highest available
-        var sourceLods = meshes.Select(m =>
-            lodIndex < m.Lods.Count ? m.Lods[lodIndex] : m.Lods[0]).ToList();
-
-        // All must have vertex data
-        var validLods = sourceLods.Where(l => l.VertexBuffer != null && l.VertexCount > 0).ToList();
-        if (validLods.Count == 0) return null;
+        // Keep each source LOD paired with the mesh it came from. Filtering the two lists
+        // separately (as this used to) desynchronises them the moment one mesh is dropped,
+        // which mislabels submeshes and would mis-assign bone remaps.
+        var sources = new List<(MeshAssetData Mesh, LodData Lod, int[]? Remap)>();
+        for (int i = 0; i < meshes.Count; i++)
+        {
+            var m = meshes[i];
+            var lod = lodIndex < m.Lods.Count ? m.Lods[lodIndex] : m.Lods[0];
+            if (lod.VertexBuffer == null || lod.VertexCount <= 0) continue;
+            sources.Add((m, lod, i < boneRemap.Length ? boneRemap[i] : null));
+        }
+        if (sources.Count == 0) return null;
 
         // Each vertex is 12 bytes (float32 × 3)
         const int VERT_STRIDE = 12;
         const int IDX_STRIDE  = 4;  // int32 per index
 
-        int totalVerts   = validLods.Sum(l => l.VertexCount);
-        int totalIndices = validLods.Sum(l => l.IndexBuffer?.Length / IDX_STRIDE ?? 0);
+        int totalVerts   = sources.Sum(s => s.Lod.VertexCount);
+        int totalIndices = sources.Sum(s => s.Lod.IndexBuffer?.Length / IDX_STRIDE ?? 0);
 
         var mergedVerts   = new byte[totalVerts   * VERT_STRIDE];
         var mergedIndices = new byte[totalIndices  * IDX_STRIDE];
 
         // UV buffer is optional — only include if every source lod has one
-        bool hasUv = validLods.All(l => l.UvBuffer != null);
+        bool hasUv = sources.All(s => s.Lod.UvBuffer != null);
         const int UV_STRIDE = 8; // float32 U + float32 V
         var mergedUvs = hasUv ? new byte[totalVerts * UV_STRIDE] : null;
+
+        // Skin rows are fixed-width, so the merged width is the widest contributor's. A part
+        // without a skin table keeps weight 0 and stays where it was authored.
+        int mergedInfluences = sources.Where(s => s.Lod.Skin != null && s.Remap != null)
+                                      .Select(s => s.Lod.Skin!.InfluencesPerVertex)
+                                      .DefaultIfEmpty(0).Max();
+        ushort[]? mergedBoneIdx = null;
+        float[]?  mergedBoneWt  = null;
+        int mergedMaxBone = -1;
+        if (mergedInfluences > 0)
+        {
+            mergedBoneIdx = new ushort[totalVerts * mergedInfluences];
+            mergedBoneWt  = new float[totalVerts * mergedInfluences];
+        }
 
         var submeshes   = new List<SubmeshInfo>();
         int vertexCursor = 0;
         int indexCursor  = 0;
 
-        for (int i = 0; i < validLods.Count; i++)
+        foreach (var (mesh, src, remap) in sources)
         {
-            var src        = validLods[i];
-            var meshName   = meshes[i < meshes.Count ? i : meshes.Count - 1].Info.Name;
             int srcVerts   = src.VertexCount;
             int srcIndices = src.IndexBuffer?.Length / IDX_STRIDE ?? 0;
 
@@ -184,15 +214,55 @@ public static class MeshMerger
                 }
             }
 
-            // Record submesh boundary
-            submeshes.Add(new SubmeshInfo
+            // Carry skin weights across, translating bone indices into the merged skeleton's
+            // index space. Without this a merged character has weights pointing at whatever
+            // bone happens to occupy that slot in the union skeleton.
+            if (mergedInfluences > 0 && mergedBoneIdx != null && mergedBoneWt != null
+                && src.Skin is { } skin && remap != null)
             {
-                Name        = meshName,
-                VertexStart = vertexCursor,
-                VertexCount = srcVerts,
-                IndexStart  = indexCursor,
-                IndexCount  = srcIndices
-            });
+                int srcInf = Math.Max(skin.InfluencesPerVertex, 1);
+                int copy   = Math.Min(srcInf, mergedInfluences);
+                for (int v = 0; v < srcVerts && v < skin.VertexCount; v++)
+                {
+                    int dstRow = (vertexCursor + v) * mergedInfluences;
+                    int srcRow = v * srcInf;
+                    for (int k = 0; k < copy; k++)
+                    {
+                        int b = skin.BoneIndices[srcRow + k];
+                        int mapped = b < remap.Length ? remap[b] : -1;
+                        if (mapped < 0) continue;
+                        mergedBoneIdx[dstRow + k] = (ushort)mapped;
+                        mergedBoneWt [dstRow + k] = skin.BoneWeights[srcRow + k];
+                        if (mapped > mergedMaxBone) mergedMaxBone = mapped;
+                    }
+                }
+            }
+
+            // Preserve the source submesh boundaries (and with them each part's material and
+            // texture assignment) instead of flattening a whole mesh into one slot.
+            var srcSubs = src.Submeshes.Count > 0
+                ? src.Submeshes
+                : new List<SubmeshInfo> { new() { Name = mesh.Info.Name, VertexStart = 0,
+                    VertexCount = srcVerts, IndexStart = 0, IndexCount = srcIndices } };
+
+            foreach (var sub in srcSubs)
+            {
+                submeshes.Add(new SubmeshInfo
+                {
+                    Name        = src.Submeshes.Count > 0 ? $"{mesh.Info.Name}|{sub.Name}" : sub.Name,
+                    VertexStart = vertexCursor + sub.VertexStart,
+                    VertexCount = sub.VertexCount,
+                    IndexStart  = indexCursor  + sub.IndexStart,
+                    IndexCount  = sub.IndexCount,
+                    MaterialName         = sub.MaterialName,
+                    DiffuseTexturePath   = sub.DiffuseTexturePath,
+                    NormalTexturePath    = sub.NormalTexturePath,
+                    DiffuseTextureData   = sub.DiffuseTextureData,
+                    DiffuseTextureWidth  = sub.DiffuseTextureWidth,
+                    DiffuseTextureHeight = sub.DiffuseTextureHeight,
+                    DiffuseTextureFormat = sub.DiffuseTextureFormat,
+                });
+            }
 
             vertexCursor += srcVerts;
             indexCursor  += srcIndices;
@@ -201,33 +271,102 @@ public static class MeshMerger
         return new LodData
         {
             LodIndex      = lodIndex,
-            ScreenSize    = validLods[0].ScreenSize,
+            ScreenSize    = sources[0].Lod.ScreenSize,
             VertexCount   = totalVerts,
             TriangleCount = totalIndices / 3,
             VertexBuffer  = mergedVerts,
             IndexBuffer   = mergedIndices,
             UvBuffer      = mergedUvs,
-            Submeshes     = submeshes
+            Submeshes     = submeshes,
+            Skin          = mergedInfluences > 0 && mergedBoneIdx != null && mergedBoneWt != null
+                ? new SkinBinding
+                {
+                    InfluencesPerVertex = mergedInfluences,
+                    VertexCount         = totalVerts,
+                    BoneIndices         = mergedBoneIdx,
+                    BoneWeights         = mergedBoneWt,
+                    MaxBoneIndex        = mergedMaxBone,
+                }
+                : null,
         };
     }
 
     // ─── Skeleton merging ─────────────────────────────────────────────────────
 
-    private static SkeletonData MergeSkeletons(IReadOnlyList<SkeletonData> skeletons)
+    /// <summary>
+    /// Union the input skeletons by bone name, first occurrence winning, and hand back a
+    /// per-input table mapping that input's bone indices onto the merged skeleton's.
+    ///
+    /// Two things this must get right, and previously did not:
+    ///   • bones are DEEP-COPIED. The originals are still referenced by their source meshes,
+    ///     so rewriting a parent index in place would corrupt those meshes.
+    ///   • parent indices are translated through the remap. A bone's parent index is only
+    ///     meaningful in its own skeleton's index space.
+    ///
+    /// In the common TLOU2 case every part pak resolves to the same shared <c>*-skel.pak</c>,
+    /// so the remap comes out as the identity and nothing moves — which is exactly right.
+    /// </summary>
+    private static SkeletonData MergeSkeletons(
+        IReadOnlyList<SkeletonData> skeletons, out List<int[]> remaps)
     {
-        // Union of bones by name. When two skeletons share a bone name, we take the
-        // first occurrence (which typically comes from the primary mesh / body).
-        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var merged    = new SkeletonData();
+        var indexByName = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var merged      = new SkeletonData();
+        remaps          = new List<int[]>(skeletons.Count);
 
+        // Pass 1: place bones and record where each source bone landed.
         foreach (var skel in skeletons)
         {
-            foreach (var bone in skel.Bones)
+            var map = new int[skel.Bones.Count];
+            for (int i = 0; i < skel.Bones.Count; i++)
             {
-                if (seenNames.Add(bone.Name))
-                    merged.Bones.Add(bone);
+                var bone = skel.Bones[i];
+                string key = string.IsNullOrEmpty(bone.Name) ? $"__bone_{i}" : bone.Name;
+
+                if (indexByName.TryGetValue(key, out int existing))
+                {
+                    map[i] = existing;
+                    continue;
+                }
+
+                map[i] = merged.Bones.Count;
+                indexByName[key] = map[i];
+                merged.Bones.Add(new BoneInfo
+                {
+                    Name             = bone.Name,
+                    ParentIndex      = bone.ParentIndex,   // still source-space; fixed in pass 2
+                    Position         = (float[])bone.Position.Clone(),
+                    Rotation         = (float[])bone.Rotation.Clone(),
+                    Scale            = (float[])bone.Scale.Clone(),
+                    GroupIndex       = bone.GroupIndex,
+                    ChildIndex       = bone.ChildIndex,
+                    ChainIndex       = bone.ChainIndex,
+                    HasBindTransform = bone.HasBindTransform,
+                });
+            }
+            remaps.Add(map);
+        }
+
+        // Pass 2: translate parent links, using the remap of whichever skeleton contributed
+        // each merged bone.
+        var fixedUp = new bool[merged.Bones.Count];
+        for (int s = 0; s < skeletons.Count; s++)
+        {
+            var skel = skeletons[s];
+            var map  = remaps[s];
+            for (int i = 0; i < skel.Bones.Count; i++)
+            {
+                int dst = map[i];
+                if (fixedUp[dst]) continue;
+                fixedUp[dst] = true;
+
+                int p = skel.Bones[i].ParentIndex;
+                merged.Bones[dst].ParentIndex =
+                    p >= 0 && p < map.Length && map[p] != dst ? map[p] : -1;
             }
         }
+
+        merged.SourceName = string.Join(" + ",
+            skeletons.Select(k => k.SourceName).Where(n => !string.IsNullOrEmpty(n)).Distinct());
 
         return merged;
     }

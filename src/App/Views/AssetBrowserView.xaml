@@ -50,6 +50,19 @@
                 <!-- Vertical divider -->
                 <Rectangle Grid.Column="2" Fill="{StaticResource Border}" Width="1" Margin="4,6"/>
 
+                <!-- Search all mounted games (only meaningful with more than one) -->
+                <CheckBox Grid.Column="3"
+                          x:Name="SearchAllGamesCheck"
+                          Content="All games"
+                          FontSize="11"
+                          Foreground="{StaticResource TextSub}"
+                          VerticalAlignment="Center"
+                          HorizontalAlignment="Right"
+                          Margin="0,0,10,0"
+                          ToolTip="Search every mounted game instead of just this one"
+                          IsChecked="{Binding SearchAllGames}"
+                          Visibility="{Binding ShowGameRail, Converter={StaticResource BoolToVis}}"/>
+
                 <!-- Search box -->
                 <Grid Grid.Column="4" Width="300" Margin="8,8" VerticalAlignment="Center">
                     <TextBox x:Name="SearchBox"
@@ -80,6 +93,8 @@
         <!-- ── Three-Panel Layout ─────────────────────────────────────────── -->
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
+                <!-- Far left: game rail (collapsed unless several games are mounted) -->
+                <ColumnDefinition Width="Auto"/>
                 <!-- Left: File tree (resizable) -->
                 <ColumnDefinition Width="240" MinWidth="140"/>
                 <ColumnDefinition Width="4"/>
@@ -90,8 +105,42 @@
                 <ColumnDefinition Width="320" MinWidth="200"/>
             </Grid.ColumnDefinitions>
 
+            <!-- ─── Game rail: switch between mounted games ───────────────── -->
+            <Border Grid.Column="0"
+                    Background="{StaticResource PanelDark}"
+                    BorderBrush="{StaticResource Border}"
+                    BorderThickness="0,0,1,0"
+                    Visibility="{Binding ShowGameRail, Converter={StaticResource BoolToVis}}">
+                <ItemsControl ItemsSource="{Binding MountedGames}" Margin="0,6">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Button Width="44" Height="44"
+                                    Margin="6,3"
+                                    Content="{Binding Badge}"
+                                    FontSize="13" FontWeight="SemiBold"
+                                    Background="{StaticResource Surface}"
+                                    Foreground="{StaticResource Text}"
+                                    BorderBrush="{StaticResource Border}"
+                                    BorderThickness="1"
+                                    Cursor="Hand"
+                                    Command="{Binding DataContext.SwitchGameCommand,
+                                              RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                    CommandParameter="{Binding}">
+                                <Button.ToolTip>
+                                    <TextBlock>
+                                        <Run Text="{Binding DisplayName, Mode=OneWay}"/>
+                                        <LineBreak/>
+                                        <Run Text="{Binding AssetCount, Mode=OneWay, StringFormat={}{0:N0} assets}"/>
+                                    </TextBlock>
+                                </Button.ToolTip>
+                            </Button>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Border>
+
             <!-- ─── Left Panel: Virtual File Tree ─────────────────────────── -->
-            <Grid Grid.Column="0">
+            <Grid Grid.Column="1">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="28"/>
                     <RowDefinition Height="*"/>
@@ -140,14 +189,14 @@
             </Grid>
 
             <!-- Splitter 1 -->
-            <GridSplitter Grid.Column="1"
+            <GridSplitter Grid.Column="2"
                           Width="4"
                           HorizontalAlignment="Stretch"
                           Background="{StaticResource Border}"
                           Cursor="SizeWE"/>
 
             <!-- ─── Center Panel: Grouped Asset Browser ───────────────────── -->
-            <Grid Grid.Column="2">
+            <Grid Grid.Column="3">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="28"/>
                     <RowDefinition Height="*"/>
@@ -268,14 +317,14 @@
             </Grid>
 
             <!-- Splitter 2 -->
-            <GridSplitter Grid.Column="3"
+            <GridSplitter Grid.Column="4"
                           Width="4"
                           HorizontalAlignment="Stretch"
                           Background="{StaticResource Border}"
                           Cursor="SizeWE"/>
 
             <!-- ─── Right Panel: Preview + Info ───────────────────────────── -->
-            <Grid Grid.Column="4">
+            <Grid Grid.Column="5">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="28"/>
                     <!-- Preview area -->

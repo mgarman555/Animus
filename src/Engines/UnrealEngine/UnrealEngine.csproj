@@ -17,8 +17,17 @@
       MIT licensed. This is the foundation of our Unreal support.
       https://github.com/FabianFG/CUE4Parse
     -->
-    <PackageReference Include="CUE4Parse" Version="*" />
-    <PackageReference Include="CUE4Parse-Conversion" Version="*" />
+    <!--
+      Pinned, not floating. CUE4Parse 1.2.2.202607 and later ship net10.0 only, so a "*"
+      version silently stops restoring against this project's net8.0 target — which takes the
+      whole solution down, not just this plugin.
+
+      These two are the last net8.0 builds, and they are a matched pair: CUE4Parse-Conversion
+      never published a plain 1.2.2 (it goes 1.2.1 → 1.2.2.202607), and 1.2.1 itself depends on
+      CUE4Parse 1.2.2. Bump both deliberately, alongside a TargetFramework change.
+    -->
+    <PackageReference Include="CUE4Parse" Version="1.2.2" />
+    <PackageReference Include="CUE4Parse-Conversion" Version="1.2.1" />
 
     <!--
       SkiaSharp: Used for DDS->PNG texture conversion.

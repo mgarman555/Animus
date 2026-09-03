@@ -1,5 +1,6 @@
 using GameAssetExplorer.Core.Interfaces;
 using GameAssetExplorer.Core.Models;
+using GameAssetExplorer.Core.Utilities;
 using System.Globalization;
 using System.Text;
 
@@ -109,6 +110,9 @@ public class FbxModelExporter : IExporter
 
             // Faces (local, rebased) + normal accumulation
             var faces = new List<int>(sub.IndexCount);
+            // Normals come from the LOD's shared buffer so FBX, glTF and the viewport all shade
+            // from identical data.
+            var shared = MeshNormals.EnsureComputed(lod);
             var nrm = new double[vc * 3];
             int end = sub.IndexStart + sub.IndexCount;
             for (int i = sub.IndexStart; i + 2 < end && i + 2 < ni; i += 3)
@@ -118,10 +122,22 @@ public class FbxModelExporter : IExporter
                 int c = BitConverter.ToInt32(ib, (i + 2) * 4) - sub.VertexStart;
                 if ((uint)a >= (uint)vc || (uint)b >= (uint)vc || (uint)c >= (uint)vc) continue;
                 faces.Add(a); faces.Add(b); faces.Add(c);
-                AccumNormal(pos, nrm, a, b, c);
             }
             if (faces.Count == 0) continue;
-            NormalizeAll(nrm);
+
+            // Native-space normals, carried into export space by the same axis swap applied to
+            // positions above. It is orthogonal, so a direction transforms like a point minus
+            // the translation — and there is no translation here. Already unit length.
+            for (int v = 0; v < vc && shared != null; v++)
+            {
+                int o = (sub.VertexStart + v) * 12;
+                if (o + 12 > shared.Length) break;
+                double nx = BitConverter.ToSingle(shared, o);
+                double ny = BitConverter.ToSingle(shared, o + 4);
+                double nz = BitConverter.ToSingle(shared, o + 8);
+                if (convert) { nrm[v * 3] = nx; nrm[v * 3 + 1] = nz; nrm[v * 3 + 2] = -ny; }
+                else         { nrm[v * 3] = nx; nrm[v * 3 + 1] = ny; nrm[v * 3 + 2] = nz; }
+            }
 
             // UVs (per vertex, V flipped to match OBJ convention)
             double[]? uv = null;
@@ -191,27 +207,6 @@ public class FbxModelExporter : IExporter
     }
 
     // ─── helpers ────────────────────────────────────────────────────────────────
-
-    private static void AccumNormal(double[] pos, double[] nrm, int a, int b, int c)
-    {
-        double ax=pos[a*3],ay=pos[a*3+1],az=pos[a*3+2];
-        double ux=pos[b*3]-ax, uy=pos[b*3+1]-ay, uz=pos[b*3+2]-az;
-        double vx=pos[c*3]-ax, vy=pos[c*3+1]-ay, vz=pos[c*3+2]-az;
-        double nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
-        nrm[a*3]+=nx; nrm[a*3+1]+=ny; nrm[a*3+2]+=nz;
-        nrm[b*3]+=nx; nrm[b*3+1]+=ny; nrm[b*3+2]+=nz;
-        nrm[c*3]+=nx; nrm[c*3+1]+=ny; nrm[c*3+2]+=nz;
-    }
-
-    private static void NormalizeAll(double[] nrm)
-    {
-        for (int i = 0; i < nrm.Length; i += 3)
-        {
-            double len = Math.Sqrt(nrm[i]*nrm[i] + nrm[i+1]*nrm[i+1] + nrm[i+2]*nrm[i+2]);
-            if (len > 1e-9) { nrm[i]/=len; nrm[i+1]/=len; nrm[i+2]/=len; }
-            else { nrm[i]=0; nrm[i+1]=1; nrm[i+2]=0; }
-        }
-    }
 
     private static string JoinNums(double[] a)
     {

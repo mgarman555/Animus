@@ -129,8 +129,8 @@ internal class GeoContext
 
         for (int i = 0; i < _numSubmesh; i++)
         {
-            int sd = _submeshesAbs + 176 * i;
-            if (sd + 176 > _data.Length)
+            int sd = _submeshesAbs + NdPakReader.SubMeshDescStride * i;
+            if (sd + NdPakReader.SubMeshDescStride > _data.Length)
             {
                 Log.Warn($"NdMeshExtractor[{_label}]: submesh {i} OOB at 0x{sd:X}");
                 continue;
@@ -264,7 +264,7 @@ internal class GeoContext
 
         // Diagnostic summary: explain why this asset may render unexpectedly. Most TLOU2
         // ND character paks contain only 1–4 actual triangle-mesh entries; the rest are
-        // auxiliary descriptors that share the 176-byte SubMeshDesc layout but aren't
+        // auxiliary descriptors that share the SubMeshDesc layout but aren't
         // renderable geometry. The "every 12th index succeeds" pattern is normal — there's
         // 1 mesh + 11 auxiliary descriptors per LOD bucket.
         if (_papTransform == 0 && _r.JointEntry == null)
