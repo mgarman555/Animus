@@ -110,6 +110,9 @@ src/
 - Base-skeleton discovery: `ellie-body.pak` → `ellie-skel.pak`; NPCs fall back to a shared rig
   (`base-male-skel.pak`, `base-female-skel.pak`, …) by bone-count coverage + name overlap
 - Animation runtime: clip → parent-local pose → world → skinning palette → CPU skinning
+- NaughtyDog anim paks decode one clip per ANIM resource, each scanned and joint-mapped within its
+  own byte range, so a pak of many clips yields many clips rather than one blended non-existent one
+- Translation/root-motion tracks decoded and attached when the clip's joint order is resolved
 - Viewport transport bar: clip picker, play/pause/loop, timeline scrubber, live re-skinning, and a
   real armature overlay (full world transforms, drawn in the current pose)
 - glTF export with skins (joints/weights/inverse-bind matrices) and animation channels
@@ -276,12 +279,30 @@ provably *is*, at every 4-byte alignment, in two passes:
    unit quaternions by construction, so smoothness is the only evidence and the bar is higher: longer
    minimum runs and a tighter step threshold. The packing that explains the most samples wins.
 
-The same continuity test separates joint-major storage from frame-major. Translation-track candidates
-are counted and reported but not decoded — without a known joint ordering an unattributed position
-track cannot be assigned to a bone, and guessing would move the wrong joint.
+The same continuity test separates joint-major storage from frame-major.
+
+**One clip per resource, not per pak.** The scan is partitioned by resource: each ANIM/ANIM_GROUP/
+ANIM_STREAM owns the bytes from its own payload start to the next one's, and is scanned — and joint-
+mapped — on its own. Sweeping the whole pak in one pass instead pools every clip's runs together,
+groups them by modal length, and emits ONE clip holding a mixture of tracks from several: a clip that
+does not exist in the game, with every other clip in the pak silently dropped. It also hands every
+clip whichever joint table is longest *anywhere* in the pak, so all but one are posed through a joint
+order that is not theirs. When no resource yields anything from its own range — an ANIM_GROUP indexing
+data elsewhere — one whole-pak sweep runs as a fallback, attributed to the first resource and flagged
+as such in the report.
+
+**Translation tracks** are decoded and attached once `NdAnimJointMap` has resolved the clip's joint
+order, in the two cases that need no guessing: as many position runs as rotation tracks (same order,
+so run *j* drives what rotation track *j* drives), or exactly one (root motion, driving the joint the
+clip's table names first). Any other count is counted, reported, and left unattached — a partial
+subset carries nothing saying *which* joints it covers. Three rejections keep padding out: bytes
+already claimed by a rotation run (a float4 stream re-read as float3s is finite, small and smooth), a
+run that never moves, and a run that stopped only because the span ended rather than because the data
+stopped qualifying.
 
 Measured on random data: **zero false positives across 16 MB** for both the uncompressed and quantised
-detectors. A 16 MB sweep of all three packings takes ~1.8 s; the scan is capped at 64 MB and logs when
+detectors, and **zero candidate position runs across 32 MB**. A 16 MB sweep of all three packings takes
+~1.8 s; the scan is capped at 64 MB and logs when
 the cap bites. When nothing validates, the parser decodes nothing and reports why, rather than emitting
 a plausible pose that would be wrong in the viewport.
 

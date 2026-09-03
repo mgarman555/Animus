@@ -84,8 +84,20 @@ public static class NdAnimParser
         public int    PackedRunsFound       { get; set; }
         public string PackedFormat          { get; set; } = "none";
         public int    TranslationRunsFound  { get; set; }
+        public int    TranslationTracksBound{ get; set; }
         /// <summary>How the clip's joint table was located, or why it wasn't.</summary>
         public string JointMapEvidence      { get; set; } = "";
+
+        /// <summary>One line per resource that yielded a clip, so a pak of many is legible.</summary>
+        public List<string> ClipOutcomes { get; } = new();
+
+        /// <summary>
+        /// True when no resource yielded a clip from its own byte range and the parser fell
+        /// back to one whole-pak sweep. Worth surfacing: the resulting clip is attributed to
+        /// the first resource, which is a guess about naming that the per-resource path does
+        /// not have to make.
+        /// </summary>
+        public bool WholeFileFallback { get; set; }
 
         public string Summarise() =>
             $"resources={Resources.Count} " +
@@ -93,9 +105,11 @@ public static class NdAnimParser
             $"quatRuns={QuaternionRunsFound} longest={LongestRun} " +
             $"dominant={DominantRunCount}×{DominantRunLength} " +
             $"meanStep={(double.IsNaN(MeanAngularStep) ? "n/a" : MeanAngularStep.ToString("F5"))} " +
-            $"packedRuns={PackedRunsFound}({PackedFormat}) transRuns={TranslationRunsFound} " +
+            $"packedRuns={PackedRunsFound}({PackedFormat}) " +
+            $"transRuns={TranslationRunsFound} transBound={TranslationTracksBound} " +
             $"jointMap=[{JointMapEvidence}] " +
-            $"layout={Layout} clips={ClipsDecoded} — {Outcome}";
+            $"layout={Layout} clips={ClipsDecoded}{(WholeFileFallback ? " (whole-pak fallback)" : "")} " +
+            $"— {Outcome}";
     }
 
     // ── Discovery ────────────────────────────────────────────────────────────
@@ -138,9 +152,100 @@ public static class NdAnimParser
 
         report.Outcome = "scanning for rotation tracks";
 
-        var runs = FindQuaternionRuns(reader.Data);
-        report.QuaternionRunsFound = runs.Count;
-        report.LongestRun = runs.Count > 0 ? runs.Max(r => r.Count) : 0;
+        // Each resource owns the bytes from its own payload start up to the next resource's,
+        // and is scanned on its own. Sweeping the whole pak in one pass instead — which is
+        // what this did before — pools every clip's runs together, groups them by modal
+        // length, and emits ONE clip holding a mixture of tracks from several: a clip that
+        // does not exist in the game, with every other clip in the pak silently dropped.
+        foreach (var (res, from, to) in ResourceSpans(report.Resources, reader.Data.Length))
+        {
+            var clip = DecodeSpan(reader.Data, res, from, to, skeleton, label, report);
+            if (clip != null) clips.Add(clip);
+        }
+
+        if (clips.Count == 0)
+        {
+            // A resource can describe a clip whose payload does not sit inside its own span —
+            // an ANIM_GROUP indexing data elsewhere in the pak is the case to expect. One
+            // whole-pak sweep keeps those working instead of regressing them to nothing; the
+            // clip is attributed to the first resource, and the report flags that it is a
+            // fallback so the naming is not mistaken for something the parser established.
+            var whole = DecodeSpan(reader.Data, report.Resources[0], 0, reader.Data.Length,
+                                   skeleton, label, report);
+            if (whole != null)
+            {
+                clips.Add(whole);
+                report.WholeFileFallback = true;
+            }
+        }
+
+        report.ClipsDecoded = clips.Count;
+
+        if (clips.Count == 0)
+        {
+            report.Outcome = "no rotation tracks found in any resource, uncompressed or in the " +
+                             "usual quantised packings — this pak's bit layout is not yet measured " +
+                             "(run tools/nd_anim_probe.py on it and feed the result back)";
+        }
+        else
+        {
+            int attributed = clips.Count(c => c.JointMappingResolved);
+            report.Outcome =
+                $"decoded {clips.Count} clip(s) from {report.Resources.Count} resource(s); " +
+                (attributed == clips.Count
+                    ? $"all attributed to named joints of '{skeleton?.SourceName}'"
+                    : attributed == 0
+                        ? "none attributed to named joints — the rotations are left unattached " +
+                          "rather than mapped positionally, because a wrong attribution plays as " +
+                          "convincing motion with every joint in the wrong place, which is harder " +
+                          "to spot than no motion"
+                        : $"{attributed} attributed to named joints, {clips.Count - attributed} left " +
+                          "unattached rather than mapped positionally") +
+                (report.ClipOutcomes.Count > 0 ? " | " + string.Join(" | ", report.ClipOutcomes) : "");
+        }
+
+        Log.Info($"NdAnimParser[{label}]: {report.Summarise()}");
+        return clips;
+    }
+
+    /// <summary>A span shorter than this cannot hold even one minimal track.</summary>
+    private const int MinSpanBytes = 16 * MinTrackSamples;
+
+    /// <summary>
+    /// The byte range each resource's payload occupies: from its own payload start to the
+    /// next resource's. Ranges too short to hold a track are dropped, which is what an
+    /// ANIM_GROUP header sitting immediately before the clip it indexes looks like.
+    /// </summary>
+    private static List<(AnimResourceInfo Res, int From, int To)> ResourceSpans(
+        List<AnimResourceInfo> resources, int dataLength)
+    {
+        var ordered = resources.OrderBy(r => r.DataStart).ToList();
+        var spans   = new List<(AnimResourceInfo, int, int)>();
+
+        for (int i = 0; i < ordered.Count; i++)
+        {
+            int from = Math.Clamp(ordered[i].DataStart, 0, dataLength);
+            int to   = i + 1 < ordered.Count
+                ? Math.Clamp(ordered[i + 1].DataStart, from, dataLength)
+                : dataLength;
+
+            if (to - from >= MinSpanBytes) spans.Add((ordered[i], from, to));
+        }
+
+        return spans;
+    }
+
+    /// <summary>
+    /// Recover one clip from one resource's byte range, or null when the range holds no
+    /// rotation tracks. Everything the scan concludes is accumulated into
+    /// <paramref name="report"/> so a pak of many clips stays diagnosable.
+    /// </summary>
+    private static AnimationAssetData? DecodeSpan(
+        byte[] data, AnimResourceInfo res, int from, int to,
+        SkeletonData? skeleton, string label, DecodeReport report)
+    {
+        var runs = FindQuaternionRuns(data, from, to);
+        report.QuaternionRunsFound += runs.Count;
 
         if (runs.Count == 0)
         {
@@ -149,19 +254,13 @@ public static class NdAnimParser
             // (largest) component, then three signed fixed-point components. Those decode to
             // unit quaternions by construction, so smoothness across samples is the only
             // evidence — which is why the run has to be longer and steadier to count.
-            runs = FindPackedRuns(reader.Data, out string packedFormat);
-            report.PackedRunsFound = runs.Count;
-            report.PackedFormat    = packedFormat;
-
-            if (runs.Count == 0)
-            {
-                report.Outcome = "no rotation tracks found, uncompressed or in the usual quantised " +
-                                 "packings — this clip's bit layout is not yet measured " +
-                                 "(run tools/nd_anim_probe.py on this pak and feed the result back)";
-                Log.Info($"NdAnimParser[{label}]: {report.Summarise()}");
-                return clips;
-            }
+            runs = FindPackedRuns(data, from, to, out string packedFormat);
+            report.PackedRunsFound += runs.Count;
+            if (runs.Count > 0) report.PackedFormat = packedFormat;
+            if (runs.Count == 0) return null;
         }
+
+        report.LongestRun = Math.Max(report.LongestRun, runs.Max(r => r.Count));
 
         // Group by run length: a clip's tracks all share one length, so the modal length is
         // the clip's frame count (joint-major) or joint count (frame-major).
@@ -170,59 +269,57 @@ public static class NdAnimParser
                            .ThenByDescending(g => g.Key)
                            .First();
 
-        report.DominantRunLength = byLength.Key;
-        report.DominantRunCount  = byLength.Count();
+        // Byte ranges the rotation runs occupy, captured before any transpose. The translation
+        // scan skips them: a stream of float4 quaternions re-read as float3s yields small
+        // finite values that step smoothly, so without this the rotation data would be
+        // rediscovered as bogus position tracks.
+        var rotationBytes = byLength.Select(r => (Start: r.Offset, End: r.Offset + r.ByteLength))
+                                    .OrderBy(x => x.Start)
+                                    .ToList();
 
         var group = byLength.OrderBy(r => r.Offset).ToList();
         double meanStep = group.Average(r => r.MeanStep);
-        report.MeanAngularStep = meanStep;
-
         bool jointMajor = meanStep <= JointMajorMaxMeanStep;
-        report.Layout = jointMajor ? "joint-major (one run per joint)" : "frame-major (one run per frame)";
 
         if (!jointMajor)
         {
             // Frame-major: sample j of run f is joint j at frame f. Transpose into tracks.
-            group = Transpose(group, reader.Data);
-            if (group.Count == 0)
-            {
-                report.Outcome = "frame-major layout detected but could not be transposed into per-joint tracks";
-                Log.Info($"NdAnimParser[{label}]: {report.Summarise()}");
-                return clips;
-            }
+            group = Transpose(group, data);
+            if (group.Count == 0) return null;
         }
 
         int jointCount = group.Count;
         int frameCount = jointMajor ? byLength.Key : byLength.Count();
+        if (frameCount < MinTrackSamples) return null;
 
-        if (frameCount < MinTrackSamples)
+        // The single-valued report fields describe the biggest clip in the pak, so the
+        // viewer's status line stays meaningful when there are many.
+        if (jointCount * frameCount > report.DominantRunCount * report.DominantRunLength)
         {
-            report.Outcome = $"only {frameCount} frames recovered — too short to be a clip";
-            Log.Info($"NdAnimParser[{label}]: {report.Summarise()}");
-            return clips;
+            report.DominantRunLength = byLength.Key;
+            report.DominantRunCount  = byLength.Count();
+            report.MeanAngularStep   = meanStep;
+            report.Layout = jointMajor
+                ? "joint-major (one run per joint)"
+                : "frame-major (one run per frame)";
         }
 
-        report.TranslationRunsFound = CountTranslationRuns(reader.Data, frameCount);
-
-        // One clip per animation resource is the common case; when a pak holds several
-        // resources but only one coherent track set, attribute it to the first resource and
-        // say so rather than inventing duplicates.
-        var primary = report.Resources[0];
-        float fps = ProbeFrameRate(reader.Data, primary.DataStart);
+        // WHICH joint each track drives, resolved by matching the skeleton's bone-name hashes
+        // against THIS resource's bytes. Mapping track j onto bone j instead would put the
+        // elbow's rotation on the spine — motion that plays convincingly with everything in
+        // the wrong place. Resolving within the span also stops a pak of many clips from
+        // handing every clip the first one's joint table.
+        var jointMap = NdAnimJointMap.Resolve(data, from, to, skeleton, $"{label}:{res.Name}");
+        if (jointMap.Resolved || string.IsNullOrEmpty(report.JointMapEvidence))
+            report.JointMapEvidence = jointMap.Evidence;
 
         var clip = new AnimationAssetData
         {
-            Info       = new AssetInfo { Name = primary.Name, Type = AssetType.Animation },
-            ClipName   = primary.Name,
-            FrameRate  = fps,
+            Info       = new AssetInfo { Name = res.Name, Type = AssetType.Animation },
+            ClipName   = res.Name,
+            FrameRate  = ProbeFrameRate(data, res.DataStart),
             FrameCount = frameCount,
         };
-
-        // WHICH joint each track drives, resolved by matching the skeleton's bone-name hashes
-        // against the pak. Mapping track j onto bone j instead would put the elbow's rotation
-        // on the spine — motion that plays convincingly with everything in the wrong place.
-        var jointMap = NdAnimJointMap.Resolve(reader.Data, skeleton, label);
-        report.JointMapEvidence = jointMap.Evidence;
 
         for (int j = 0; j < jointCount; j++)
         {
@@ -246,29 +343,25 @@ public static class NdAnimParser
             {
                 var q = run.Samples != null
                     ? run.Samples[f]
-                    : ReadQuat(reader.Data, run.Offset + f * 16);
+                    : ReadQuat(data, run.Offset + f * 16);
                 track.RotationKeys.Add(new[] { q.X, q.Y, q.Z, q.W });
             }
             clip.Tracks.Add(track);
             clip.JointNames.Add(track.BoneName);
         }
 
-        clips.Add(clip);
-        report.ClipsDecoded = 1;
         int bound = clip.Tracks.Count(t => t.BoneIndex >= 0);
         clip.JointMappingResolved = bound > 0;
 
-        report.Outcome = bound == 0
-            ? $"decoded {jointCount} rotation tracks × {frameCount} frames, but could not work out " +
-              $"which joint each drives ({jointMap.Evidence}). The rotations are left unattached " +
-              "rather than mapped positionally — a wrong attribution plays as convincing motion " +
-              "with every joint in the wrong place, which is harder to spot than no motion."
-            : $"decoded {jointCount} rotation tracks × {frameCount} frames; {bound} attributed to " +
-              $"named joints of '{skeleton?.SourceName}' via {jointMap.Evidence}" +
-              (bound < jointCount ? $" ({jointCount - bound} track(s) unmatched)" : "");
+        int moved = AttachTranslations(data, from, to, clip, frameCount, rotationBytes,
+                                       jointMap, report);
 
-        Log.Info($"NdAnimParser[{label}]: {report.Summarise()}");
-        return clips;
+        report.ClipOutcomes.Add(
+            $"'{res.Name}' {jointCount}×{frameCount}" +
+            (bound == jointCount ? "" : $" ({bound} attributed)") +
+            (moved > 0 ? $" +{moved} pos" : ""));
+
+        return clip;
     }
 
     // ── Track scanning ───────────────────────────────────────────────────────
@@ -277,21 +370,23 @@ public static class NdAnimParser
     {
         public int Offset;
         public int Count;
+        /// <summary>Bytes the run occupies, so the translation scan can skip over it.</summary>
+        public int ByteLength;
         public double MeanStep;
         public Quaternion[]? Samples;   // set only for synthesised (transposed) runs
     }
 
     /// <summary>
-    /// Every maximal 4-byte-aligned run of unit-length float4s in the file. Runs shorter than
-    /// <see cref="MinTrackSamples"/> are dropped — four consecutive unit quaternions arising
-    /// by chance from unrelated bytes is vanishingly unlikely, which is what makes this a
-    /// reliable detector rather than a heuristic.
+    /// Every maximal 4-byte-aligned run of unit-length float4s in <c>[from, to)</c>. Runs
+    /// shorter than <see cref="MinTrackSamples"/> are dropped — four consecutive unit
+    /// quaternions arising by chance from unrelated bytes is vanishingly unlikely, which is
+    /// what makes this a reliable detector rather than a heuristic.
     /// </summary>
-    private static List<QuatRun> FindQuaternionRuns(byte[] data)
+    private static List<QuatRun> FindQuaternionRuns(byte[] data, int from, int to)
     {
         var runs = new List<QuatRun>();
-        int limit = data.Length - 16;
-        int i = 0;
+        int limit = Math.Min(to, data.Length) - 16;
+        int i = Math.Max(from, 0);
 
         while (i <= limit)
         {
@@ -302,7 +397,13 @@ public static class NdAnimParser
             while (i <= limit && IsUnitQuat(data, i)) { count++; i += 16; }
 
             if (count >= MinTrackSamples)
-                runs.Add(new QuatRun { Offset = start, Count = count, MeanStep = MeanAngularStep(data, start, count) });
+                runs.Add(new QuatRun
+                {
+                    Offset     = start,
+                    Count      = count,
+                    ByteLength = count * 16,
+                    MeanStep   = MeanAngularStep(data, start, count),
+                });
         }
 
         return runs;
@@ -407,17 +508,17 @@ public static class NdAnimParser
     /// keeping the one that yields the most track-like data. Returns runs whose samples are
     /// already decoded, so the caller treats them exactly like uncompressed ones.
     /// </summary>
-    private static List<QuatRun> FindPackedRuns(byte[] data, out string formatName)
+    private static List<QuatRun> FindPackedRuns(byte[] data, int from, int to, out string formatName)
     {
         var best = new List<QuatRun>();
         formatName = "none";
 
         foreach (var fmt in PackedFormats)
         {
-            if (data.Length > PackedScanByteCap)
+            if (to - from > PackedScanByteCap)
                 Log.Info($"NdAnimParser: packed scan ({fmt.Name}) covers the first " +
-                         $"{PackedScanByteCap / (1 << 20)} MB of {data.Length / (1 << 20)} MB");
-            var found = ScanPacked(data, fmt);
+                         $"{PackedScanByteCap / (1 << 20)} MB of this {(to - from) / (1 << 20)} MB span");
+            var found = ScanPacked(data, fmt, from, to);
             // Prefer the packing that explains the most samples, not merely the most runs —
             // a format that misreads produces many short runs, not a few long ones.
             if (found.Sum(r => r.Count) > best.Sum(r => r.Count))
@@ -431,24 +532,25 @@ public static class NdAnimParser
     }
 
     /// <summary>
-    /// How much of a pak the packed scan will sweep. Finding the packing only needs a
+    /// How much of a span the packed scan will sweep. Finding the packing only needs a
     /// representative slice, and sweeping every alignment of a several-hundred-megabyte anim
     /// pak three times over is not worth the wait. When the cap bites it is logged, never
     /// silently applied.
     /// </summary>
     private const int PackedScanByteCap = 64 << 20;
 
-    private static List<QuatRun> ScanPacked(byte[] data, PackedFormat fmt)
+    private static List<QuatRun> ScanPacked(byte[] data, PackedFormat fmt, int from, int to)
     {
         var runs = new List<QuatRun>();
         int stride = fmt.ByteStride;
-        int scanEnd = Math.Min(data.Length, PackedScanByteCap);
+        int begin = Math.Max(from, 0);
+        int scanEnd = Math.Min(Math.Min(to, data.Length), begin + PackedScanByteCap);
         int limit = scanEnd - stride * MinPackedSamples;
-        if (limit <= 0) return runs;
+        if (limit <= begin) return runs;
 
         // Step by the stride so a run is only found at its true alignment; the outer walk
         // advances 4 bytes at a time so every plausible alignment is still visited.
-        for (int start = 0; start < limit; start += 4)
+        for (int start = begin; start < limit; start += 4)
         {
             int count = 0;
             double stepSum = 0;
@@ -458,7 +560,7 @@ public static class NdAnimParser
             for (int k = 0; ; k++)
             {
                 int o = start + k * stride;
-                if (o + stride > data.Length) break;
+                if (o + stride > scanEnd) break;
                 var q = UnpackSmallestThree(data, o, fmt);
                 if (q is null) break;
 
@@ -478,10 +580,11 @@ public static class NdAnimParser
             {
                 runs.Add(new QuatRun
                 {
-                    Offset   = start,
-                    Count    = count,
-                    MeanStep = stepSum / (count - 1),
-                    Samples  = samples.ToArray(),
+                    Offset     = start,
+                    Count      = count,
+                    ByteLength = count * stride,
+                    MeanStep   = stepSum / (count - 1),
+                    Samples    = samples.ToArray(),
                 });
                 start += count * stride - 4;   // skip past what we just consumed
             }
@@ -532,47 +635,160 @@ public static class NdAnimParser
     // ── Translation tracks ───────────────────────────────────────────────────
 
     /// <summary>
-    /// Count runs of float3s that behave like a translation track: finite, at a physically
-    /// plausible magnitude for a character rig, and moving smoothly. Reported rather than
-    /// decoded — until a clip's joint ordering is known, an unattributed position track cannot
-    /// be assigned to a bone, and guessing would move the wrong joint.
+    /// Recover this clip's position tracks and attach them to the joints they drive; returns
+    /// how many were attached.
+    ///
+    /// <para>Counting these without decoding them used to be the only honest option: an
+    /// unattributed position track cannot be assigned to a bone, and guessing slides the wrong
+    /// joint. <see cref="NdAnimJointMap"/> now establishes the clip's joint ORDER from name
+    /// hashes, which makes two cases attributable without guessing:</para>
+    ///
+    /// <list type="bullet">
+    /// <item>as many position runs as rotation tracks — the clip stores both per joint in the
+    /// same order, so run <c>j</c> drives whatever bone rotation track <c>j</c> drives;</item>
+    /// <item>exactly one — root motion, driving the joint the clip's table names first.</item>
+    /// </list>
+    ///
+    /// <para>Any other count is counted, reported and left unattached. A partial subset carries
+    /// nothing that says WHICH joints it covers, and attaching it in order would translate the
+    /// wrong bones — which reads as a character sliding along the floor, sourced from a joint
+    /// that never moved.</para>
     /// </summary>
-    private static int CountTranslationRuns(byte[] data, int expectedFrames)
+    private static int AttachTranslations(
+        byte[] data, int from, int to, AnimationAssetData clip, int frameCount,
+        List<(int Start, int End)> rotationBytes, NdAnimJointMap.Result jointMap,
+        DecodeReport report)
+    {
+        // A handful of samples that happen to drift smoothly is not evidence of a track.
+        if (frameCount < MinTranslationSamples) return 0;
+
+        var runs = FindTranslationRuns(data, from, to, frameCount, rotationBytes);
+        report.TranslationRunsFound += runs.Count;
+
+        if (runs.Count == 0 || !jointMap.Resolved) return 0;
+
+        int attached = 0;
+
+        if (runs.Count == clip.Tracks.Count)
+        {
+            for (int j = 0; j < runs.Count; j++)
+            {
+                if (clip.Tracks[j].BoneIndex < 0) continue;
+                AddPositionKeys(clip.Tracks[j], runs[j].Samples);
+                attached++;
+            }
+        }
+        else if (runs.Count == 1 && clip.Tracks.Count > 0 && clip.Tracks[0].BoneIndex >= 0)
+        {
+            // Root motion. Track 0 is the joint the clip's own table names first, which is the
+            // root in ND rigs — the same ordering the rotation attribution already relies on.
+            AddPositionKeys(clip.Tracks[0], runs[0].Samples);
+            attached = 1;
+        }
+
+        report.TranslationTracksBound += attached;
+        return attached;
+    }
+
+    private static void AddPositionKeys(AnimTrack track, Vector3[] samples)
+    {
+        foreach (var v in samples) track.PositionKeys.Add(new[] { v.X, v.Y, v.Z });
+    }
+
+    private sealed class VecRun
+    {
+        public int Offset;
+        public Vector3[] Samples = Array.Empty<Vector3>();
+    }
+
+    /// <summary>
+    /// Runs of float3s that behave like a position track: finite, at a physically plausible
+    /// magnitude for a character rig, and moving smoothly. A track for THIS clip holds exactly
+    /// one sample per frame, so only runs of exactly <paramref name="frameCount"/> count —
+    /// which is both the right constraint and a free check on the frame count itself.
+    /// </summary>
+    private static List<VecRun> FindTranslationRuns(
+        byte[] data, int from, int to, int frameCount, List<(int Start, int End)> rotationBytes)
     {
         const float MaxCoord = 100f;      // metres; a character rig lives well inside this
         const float MaxStep  = 0.5f;      // metres between consecutive frames
-        int runs = 0;
-        int limit = data.Length - 12;
 
-        for (int start = 0; start < limit; start += 4)
+        var runs  = new List<VecRun>();
+        int begin = Math.Max(from, 0);
+        int end   = Math.Min(to, data.Length);
+        int limit = end - 12;
+
+        for (int start = begin; start <= limit; start += 4)
         {
-            int count = 0;
+            if (InAnyRange(rotationBytes, start)) continue;
+
+            var samples = new List<Vector3>();
             Vector3 prev = default;
+            bool endedOnContent = false;   // the run stopped because the DATA stopped qualifying
 
             for (int k = 0; ; k++)
             {
                 int o = start + k * 12;
-                if (o + 12 > data.Length) break;
+                if (o + 12 > end) break;                              // ran out of span
+                if (InAnyRange(rotationBytes, o)) { endedOnContent = true; break; }
+
                 float x = BitConverter.ToSingle(data, o);
                 float y = BitConverter.ToSingle(data, o + 4);
                 float z = BitConverter.ToSingle(data, o + 8);
-                if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z)) break;
-                if (MathF.Abs(x) > MaxCoord || MathF.Abs(y) > MaxCoord || MathF.Abs(z) > MaxCoord) break;
+                if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z)) { endedOnContent = true; break; }
+                if (MathF.Abs(x) > MaxCoord || MathF.Abs(y) > MaxCoord || MathF.Abs(z) > MaxCoord) { endedOnContent = true; break; }
 
                 var v = new Vector3(x, y, z);
-                if (k > 0 && (v - prev).Length() > MaxStep) break;
+                if (k > 0 && (v - prev).Length() > MaxStep) { endedOnContent = true; break; }
                 prev = v;
-                count++;
+                samples.Add(v);
+
+                // No point reading past a full clip's worth: a longer run is not this track.
+                if (samples.Count > frameCount) { endedOnContent = true; break; }
             }
 
-            if (count >= Math.Max(MinTranslationSamples, Math.Min(expectedFrames, 64)))
+            // Two ways a span's unused tail imitates a track, both rejected here.
+            //
+            // Zero-filled padding is finite, in range and perfectly smooth, so it satisfies
+            // every test above. A run that never moves is therefore not accepted: it cannot be
+            // told apart from padding, and attaching it would change no pose anyway, since a
+            // joint that holds still is already where the bind pose put it.
+            //
+            // And a run is only a track if it stopped because the DATA stopped qualifying.
+            // One that merely hit the end of the span is an artifact of where the span happens
+            // to end — a tail of padding leaves exactly one clip's worth before the boundary
+            // often enough to matter, and the neighbouring resource's header supplies just
+            // enough variation to get it past the constant test.
+            if (samples.Count == frameCount && endedOnContent && !IsConstant(samples))
             {
-                runs++;
-                start += count * 12 - 4;
+                runs.Add(new VecRun { Offset = start, Samples = samples.ToArray() });
+                start += samples.Count * 12 - 4;
             }
         }
 
         return runs;
+    }
+
+    /// <summary>Does this run hold the same position at every frame?</summary>
+    private static bool IsConstant(List<Vector3> samples)
+    {
+        for (int i = 1; i < samples.Count; i++)
+            if (samples[i] != samples[0]) return false;
+        return true;
+    }
+
+    /// <summary>Is <paramref name="pos"/> inside one of these sorted, non-overlapping ranges?</summary>
+    private static bool InAnyRange(List<(int Start, int End)> ranges, int pos)
+    {
+        int lo = 0, hi = ranges.Count - 1;
+        while (lo <= hi)
+        {
+            int mid = (lo + hi) >> 1;
+            if (pos < ranges[mid].Start) hi = mid - 1;
+            else if (pos >= ranges[mid].End) lo = mid + 1;
+            else return true;
+        }
+        return false;
     }
 
     /// <summary>

@@ -56,8 +56,21 @@ public static class NdAnimJointMap
     /// until someone looks closely, which is worse than no animation at all.
     /// </summary>
     public static Result Resolve(byte[] data, SkeletonData? skeleton, string label)
+        => Resolve(data, 0, data.Length, skeleton, label);
+
+    /// <summary>
+    /// As <see cref="Resolve(byte[], SkeletonData?, string)"/>, but confined to the byte range
+    /// <c>[from, to)</c> — one animation resource's own payload. Confining it matters in a pak
+    /// of many clips: searching the whole file returns the single longest table anywhere in
+    /// it, so every clip would be attributed through whichever clip happens to animate the
+    /// most joints, and all the others would be posed through a joint order that is not theirs.
+    /// </summary>
+    public static Result Resolve(byte[] data, int from, int to, SkeletonData? skeleton, string label)
     {
-        if (skeleton is not { Bones.Count: > 0 } || data.Length < 64)
+        int begin = Math.Max(from, 0);
+        int end   = Math.Min(to, data.Length);
+
+        if (skeleton is not { Bones.Count: > 0 } || end - begin < 64)
             return new Result { Evidence = "no skeleton to match joint hashes against" };
 
         // hash → bone index. Duplicate bone names keep the first index.
@@ -71,14 +84,14 @@ public static class NdAnimJointMap
         {
             // Walk every aligned start once; a run is a maximal sequence of slots, `stride`
             // apart, that all hash to a bone of this skeleton.
-            for (int start = 0; start + 8 <= data.Length; start += 4)
+            for (int start = begin; start + 8 <= end; start += 4)
             {
                 if (!byHash.ContainsKey(BitConverter.ToUInt64(data, start))) continue;
 
                 var bones = new List<int>();
                 var seen  = new HashSet<int>();
                 int at = start;
-                while (at + 8 <= data.Length &&
+                while (at + 8 <= end &&
                        byHash.TryGetValue(BitConverter.ToUInt64(data, at), out int bone))
                 {
                     // A joint table names each joint once; a repeat means we have run off the
