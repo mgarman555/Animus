@@ -172,7 +172,11 @@ Every `.ytd`/`.ydr`/`.ydd`/`.yft` is an **RSC7 resource**, not a flat file:
 - TLOU2 pad: `+16` bytes before geometry header (`isTLOU2` check: `R32(loginStart+32) == 74565`)
 - SMD array pointer at `ghOff+40` (fixup → absolute); stride = **192 bytes** (TLOU2 PC — Noesis's 176 is wrong here; the count fields sit +8 from where the Noesis walk puts them, so the real struct is 16 bytes longer)
 - Key SMD field offsets: `+0x20` namePtr, `+0x30` streamDescPtr, `+0x40` indexPtr, `+0x48` m_material, `+0x88` numVerts, `+0x8C` numIdx, `+0x90` numStreams
-- numMaterials field (`ghOff+16`) reads 0 on these paks — do NOT gate material parsing on it; use each submesh's `+0x48` m_material pointer directly
+- numMaterials field (`ghOff+16`) reads 0 on these paks — do NOT gate anything on it. Materials come
+  from each submesh's `+0x48` m_material pointer directly; `m_papTransform`'s array length comes from
+  the pointer-fixup table (walk while slots resolve, first miss is the end). `NdTransformApplier` was
+  dead for exactly this reason — it looped `m < numMaterials`, so it never looked at a single matrix
+  and logged "no usable m_papTransform matrices found" as though the pak had none
 - LOD index: read from name suffix `"ShapeN"` (N = 0..3)
 - **Continuous bitstream**: quantised positions use a single shared `bitOff` across all vertices — do NOT reset per vertex
 

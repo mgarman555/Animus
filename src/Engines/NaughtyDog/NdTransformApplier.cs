@@ -57,6 +57,33 @@ public static class NdTransformApplier
         }
         int papBase = (int)papPtr.Value;
 
+        // m_papTransform is an array of per-material pointers, and this used to walk it for
+        // m in 0..numMaterials. That field reads 0 on real TLOU2 character paks — the same
+        // field the material parser already had to stop trusting — so the walk never ran, both
+        // candidate layouts were rejected on total == 0, and the log reported "no usable
+        // m_papTransform matrices found" as though the pak carried none rather than as though
+        // nothing had been looked at. The whole post-process was dead, and with it the
+        // per-submesh world matrices that stop a character loading as disjoint islands.
+        //
+        // The fixup table gives an exact extent instead of a guess: an array slot either has a
+        // pointer fixup or it does not, and the first one that does not is the end. The header
+        // field is still preferred when it is plausible, so paks that do fill it in are read
+        // exactly as before.
+        int materialCount = numMaterials > 0 && numMaterials <= MaxMaterials
+            ? numMaterials
+            : CountResolvablePointers(reader, papBase, MaxMaterials);
+
+        if (materialCount == 0)
+        {
+            Log.Info($"NdTransformApplier[{label}]: m_papTransform at 0x{papBase:X} has no resolvable " +
+                     $"entries (header numMaterials={numMaterials})");
+            return 0;
+        }
+
+        if (numMaterials <= 0)
+            Log.Info($"NdTransformApplier[{label}]: header numMaterials reads {numMaterials}; " +
+                     $"took {materialCount} m_papTransform entries from the fixup table instead");
+
         // ── Walk SubMeshDesc table once to build name → AbsOffset map ───────
         // Names match the legacy parser's SubmeshInfo.Name (short tail after final '|').
         var smdAbsByName = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -98,7 +125,7 @@ public static class NdTransformApplier
             var found = new Dictionary<int, Matrix4x4>();
             int total = 0, valid = 0;
 
-            for (int m = 0; m < numMaterials; m++)
+            for (int m = 0; m < materialCount; m++)
             {
                 var matStructPtr = reader.ReadPointerFixup(papBase + 8 * m);
                 if (matStructPtr is null || matStructPtr.Value <= 0) continue;
@@ -169,6 +196,21 @@ public static class NdTransformApplier
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>Upper bound on materials, matching the submesh-count sanity cap.</summary>
+    private const int MaxMaterials = 1024;
+
+    /// <summary>
+    /// How many consecutive 8-byte slots from <paramref name="baseAddr"/> carry a pointer the
+    /// pak's fixup table resolves. A slot without a fixup is not a pointer, so the first miss
+    /// is the array's real end.
+    /// </summary>
+    private static int CountResolvablePointers(NdPakReader reader, int baseAddr, int cap)
+    {
+        int n = 0;
+        while (n < cap && reader.ReadPointerFixup(baseAddr + 8 * n) is > 0) n++;
+        return n;
+    }
 
     private static void ApplyMatrixToRange(byte[] vb, int vStart, int vCount, Matrix4x4 mat)
     {
