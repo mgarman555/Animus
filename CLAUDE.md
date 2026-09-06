@@ -212,9 +212,15 @@ and a cipher called TFIT whose keys no public tool holds. CodeWalker has zero RP
   joaat** — it is LUT-substituted (`temp = 1025 * (LUT[c] + result); result = (temp>>6) ^ temp`,
   returning `32769 * ((9*result >> 11) ^ 9*result)`) and the name is **not lowercased**
 - Four key artifacts are needed, not three. The 256-byte hash LUT is the one people omit, and without
-  it every TOC decrypts to noise with no other symptom. Get them by running CodeWalker once and
-  saving its keys: `gtav_aes_key.dat` (32 B), `gtav_ng_key.dat` (101x272), `gtav_ng_decrypt_tables.dat`
-  (17x16x256x4), `gtav_hash_lut.dat` (256 B). Drop them in `%AppData%\GameAssetExplorer\RageKeys`
+  it every TOC decrypts to noise with no other symptom: `gtav_aes_key.dat` (32 B),
+  `gtav_ng_key.dat` (101x272), `gtav_ng_decrypt_tables.dat` (17x16x256x4), `gtav_hash_lut.dat` (256 B)
+- **CodeWalker is not needed to get them.** `tools/gta5_keys.py` locates all of it in your own
+  gta5.exe by SHA-1 hash search (the digests, not the keys, live in `tools/gta5_key_hashes.py`).
+  `--exe <GTA5.exe> --save-keys <dir>` makes it a one-time ~30s cost, and the saved layout is
+  byte-identical to a CodeWalker dump, so `GtaKeys.cs` reads it too
+- 375 key slots but only **187 distinct blobs**: GTA V reuses decrypt tables, so its 272 table slots
+  are drawn from 84 distinct tables, one of them 15 times. A digest->index map silently leaves 188
+  slots unfilled and makes a good exe look like it is missing key material; it must be digest->list
 - **Only tables of contents are encrypted.** Asset bodies are plaintext — CodeWalker sets
   `IsEncrypted` for `.ysc` scripts alone. Once a TOC opens, .ydr/.ytd/.ymap need deflate and nothing
   else. There is no AES key you can paste into a settings box; that setting has been removed

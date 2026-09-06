@@ -17,14 +17,9 @@ Usage
 
 Keys
 ----
-Four files, all four required, from a CodeWalker key dump:
-  gtav_aes_key.dat             32 bytes
-  gtav_ng_key.dat              101 * 272   = 27,472 bytes
-  gtav_ng_decrypt_tables.dat   17*16*256*4 = 278,528 bytes
-  gtav_hash_lut.dat            256 bytes
-
-The LUT is the one people leave out. NG subkey selection uses a LUT-substituted hash, not joaat,
-so without it every table of contents decrypts to noise and there is no other symptom.
+Pass --exe and the key material is pulled straight out of your own GTA5.exe (about half a minute,
+then --save-keys makes it a one-time cost). Or pass --keys pointing at a saved dump. Nothing key
+related is stored in this repository; it all comes from your copy of the game. See gta5_keys.py.
 """
 
 import argparse
@@ -47,24 +42,8 @@ ENC_NAMES = {ENC_NONE: "NONE", ENC_OPEN: "OPEN", ENC_AES: "AES", ENC_NG: "NG"}
 
 # ── keys ──────────────────────────────────────────────────────────────────────
 
-class Keys:
-    def __init__(self, directory):
-        def rd(name, expect):
-            path = os.path.join(directory, name)
-            with open(path, "rb") as f:
-                data = f.read()
-            if len(data) != expect:
-                raise SystemExit(f"{name} is {len(data)} bytes, expected {expect}")
-            return data
-
-        self.aes = rd("gtav_aes_key.dat", 32)
-        ng = rd("gtav_ng_key.dat", 101 * 272)
-        self.ng_keys = [ng[i * 272:(i + 1) * 272] for i in range(101)]
-        tab = rd("gtav_ng_decrypt_tables.dat", 17 * 16 * 256 * 4)
-        flat = struct.unpack_from("<%dI" % (17 * 16 * 256), tab, 0)
-        self.tables = [[list(flat[(r * 16 + c) * 256:(r * 16 + c) * 256 + 256])
-                        for c in range(16)] for r in range(17)]
-        self.lut = rd("gtav_hash_lut.dat", 256)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gta5_keys import Keys, KeyError_   # noqa: E402
 
 
 def gta5_hash(text, lut):
@@ -332,7 +311,9 @@ def probe(path, keys, find=None, extract=None, out=None, quiet=False):
 def main():
     ap = argparse.ArgumentParser(description="Probe RPF7 (GTA V) archives.")
     ap.add_argument("target", help=".rpf file, or a directory with --scan-dir")
-    ap.add_argument("--keys", required=True, help="directory holding the four gtav_*.dat key files")
+    ap.add_argument("--keys", help="directory holding a saved key dump (four gtav_*.dat files)")
+    ap.add_argument("--exe", help="path to GTA5.exe; extracts the key material directly from it")
+    ap.add_argument("--save-keys", metavar="DIR", help="write the extracted keys here for reuse")
     ap.add_argument("--scan-dir", action="store_true", help="probe every .rpf under target")
     ap.add_argument("--find", help="print file paths containing this substring")
     ap.add_argument("--extract", help="extract the first file whose path ends with this")
@@ -340,7 +321,13 @@ def main():
     ap.add_argument("--quiet", action="store_true", help="counts only, no path listings")
     args = ap.parse_args()
 
-    keys = Keys(args.keys)
+    try:
+        keys = Keys.load(keys_dir=args.keys, exe=args.exe)
+    except KeyError_ as e:
+        raise SystemExit(f"key error: {e}")
+    if args.save_keys:
+        print(f"keys saved to {keys.save(args.save_keys)}")
+    print(f"keys from {keys.source}\n")
 
     if args.scan_dir:
         targets = []
