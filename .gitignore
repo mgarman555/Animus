@@ -9,3 +9,7 @@ obj/
 
 # Handoff artifacts (bundle is a copy of history; no need to track)
 handoff/
+
+# Python bytecode
+__pycache__/
+*.pyc
