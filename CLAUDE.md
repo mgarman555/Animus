@@ -236,12 +236,44 @@ declaration, and the vertex buffer must be structurally rebuilt because componen
 A Legacy-targeted reader on an Enhanced install mounts fine, lists fine, reads placements fine, then
 produces garbage geometry. Establish which edition is installed before writing any drawable code.
 
+### GTA V -> UE coordinate contract (derived and verified, not assumed)
+`tools/test_transform_convention.py` proves the whole chain. Quote it, do not re-derive it.
+- The model exporters apply `(x, z, -y)`, whose determinant is **+1**. That is a rotation about X,
+  NOT a handedness flip, despite what the old doc comments claimed. It is correct for a
+  right-handed Z-up source like GTA
+- Composed with UE's glTF import (which does flip handedness), the result is
+  **`UE = (gta.y, gta.x, gta.z) * 100`** — the XY swap, not negate-Y. Placements must use the same
+  composition as the meshes or the region mirrors against its own geometry, which reads as a
+  quaternion bug for a day
+- **`ue_quat = (stored.y, stored.x, stored.z, stored.w)`** straight off the ymap. `CEntityDef.rotation`
+  is stored as the conjugate, and inverting it then re-expressing the rotation in UE's basis
+  produces two sign flips that cancel. That cancellation is why this looks like a bare swap and why
+  it is worth a test rather than a comment. `CMloInstanceDef` is NOT conjugated; its children are
+- Scale is `(scaleXY, scaleXY, scaleZ)`, never uniform
+- GTA north lands on UE +Y. For north on +X, yaw the region root actor +90 rather than adding a
+  second conversion path
+
+### UE ingest contract
+`region.json` (`tools/ue/region_manifest.py`, format `gae.region/1`) is the seam between GAE and
+Unreal. Positions and rotations in it are **already in UE space**, so the conversion lives in exactly
+one place and cannot drift. One StaticMesh per unique archetype, many instances, never a merged mesh.
+Cells map one-to-one to source ymaps so they can become sublevels or Data Layers later.
+`tools/ue/spawn_region.py` batches one `add_instances` call per (cell, archetype) group with
+collision off during the spawn (the reported ISM slowness is Chaos collision rebuild, not an
+instance-count ceiling). An instance referencing an archetype with no imported mesh is a **hard
+failure**, never a silent skip — the silent version places most of the region and leaves the beach
+quietly emptier than the game, which is invisible without the check.
+`tools/test_ue_spawn.py` builds a synthetic Del Perro Pier from the real coordinates and exercises
+all of it offline; the region.json it writes can drive a cube-mesh dry run in UE before GAE exports
+anything.
+
 ### Validation pattern
 Same as the TLOU2 work: Python first, against real bytes, then port. `tools/rage_rpf_probe.py` is an
 independent implementation of everything above; `tools/test_rage_crypto.py` differentially tests the
 NG cipher against a literal CodeWalker transcription (2000 random blocks); `tools/test_rpf_roundtrip.py`
-builds a synthetic RPF7 with a nested archive and reads it back. All three pass. None of them has seen
-a real GTA V archive yet, which is the single next thing to do.
+builds a synthetic RPF7 with a nested archive and reads it back. `tools/test_transform_convention.py`
+and `tools/test_ue_spawn.py` cover the Unreal half. All five pass. None of them has seen a real GTA V
+archive yet, which is the single next thing to do.
 
 ## Test Assets (on Madi's PC)
 

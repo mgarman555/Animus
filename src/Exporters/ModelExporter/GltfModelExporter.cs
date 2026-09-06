@@ -12,8 +12,14 @@ namespace GameAssetExplorer.Exporters.ModelExporter;
 /// default model format: Assimp can write glTF (unlike FBX), and .glb is a single embedded file.
 ///
 /// Coordinate system matches the OBJ/FBX exporters: when
-/// <see cref="ExportSettings.ApplyBlenderBoneCorrection"/> is set, UE (Z-up) is converted to the
-/// Y-up convention glTF expects (x, z, -y). Skeleton nodes are emitted for skeletal meshes;
+/// <see cref="ExportSettings.ApplyBlenderBoneCorrection"/> is set, vertices go through (x, z, -y),
+/// which is a -90 degree rotation about X. Note that its determinant is +1, so it is a rotation
+/// and NOT a handedness flip — it takes a right-handed Z-up source to right-handed Y-up, which is
+/// exactly what glTF wants. Composed with UE's own glTF import (which does flip handedness), a
+/// right-handed Z-up source such as GTA V lands at UE = (srcY, srcX, srcZ). Any placement data
+/// exported alongside these meshes must use that same composition or the two will be mirrored
+/// relative to each other; see tools/test_transform_convention.py, which proves it.
+/// Skeleton nodes are emitted for skeletal meshes;
 /// skin weights aren't carried by <see cref="LodData"/> yet, so the mesh isn't bound to them.
 /// </summary>
 public class GltfModelExporter : IExporter

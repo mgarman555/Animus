@@ -19,10 +19,10 @@ namespace GameAssetExplorer.Exporters.ModelExporter;
 ///   - {meshName}_meta.json — full asset metadata (written by JsonMetadataExporter)
 ///
 /// Coordinate system:
-///   Unreal is Left-Handed, Y-forward, Z-up.
 ///   OBJ convention (and Blender default) is Right-Handed, Y-up.
-///   The exporter applies the conversion: OBJ X = UE X, OBJ Y = UE Z, OBJ Z = -UE Y
-///   so the mesh comes in oriented correctly in Blender without needing manual rotation.
+///   The exporter applies: OBJ X = X, OBJ Y = Z, OBJ Z = -Y.
+///   That matrix has determinant +1, so it is a -90 degree rotation about X, not a handedness
+///   flip. It takes a right-handed Z-up source to right-handed Y-up, which is what Blender wants.
 ///   Toggle ApplyCoordConversion = false in settings if you're importing back into UE.
 /// </summary>
 public class ObjModelExporter : IExporter
@@ -137,9 +137,8 @@ public class ObjModelExporter : IExporter
         bool hasUv  = lod.UvBuffer != null;
         float scale = settings.ModelScaleFactor;
 
-        // Coord conversion: UE (X,Y,Z right-hand-Y-up) → OBJ (X,Z,-Y)
-        // UE is left-handed Y-forward Z-up; OBJ is right-handed Y-up.
-        // Transformation: objX = ueX, objY = ueZ, objZ = -ueY
+        // Z-up → Y-up: objX = x, objY = z, objZ = -y. A rotation about X (determinant +1),
+        // so handedness is preserved rather than flipped.
         bool convert = settings.ApplyBlenderBoneCorrection;
 
         var sb = new StringBuilder();
