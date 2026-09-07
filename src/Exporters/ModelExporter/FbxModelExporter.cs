@@ -11,7 +11,8 @@ namespace GameAssetExplorer.Exporters.ModelExporter;
 /// validated by re-importing through Assimp.
 ///
 /// Coordinate system matches the OBJ exporter: when <see cref="ExportSettings.ApplyBlenderBoneCorrection"/>
-/// is set, UE (left-handed, Z-up) is converted to Y-up (x, z, -y); the file is tagged Y-up / cm.
+/// is set, vertices go through (x, z, -y) — a rotation about X, determinant +1, so Z-up becomes
+/// Y-up with handedness preserved. The file is tagged Y-up / cm.
 ///
 /// Not yet emitted: skin weights (our <see cref="LodData"/> doesn't carry them), so the mesh isn't
 /// bound to a skeleton. Geometry, UVs, normals and per-submesh materials are all present.

@@ -11,8 +11,14 @@ Educational game asset explorer (.exe) for browsing, previewing, and exporting a
 > resolves its own diffuse/normal texPath. ③ Per-submesh full-res textures wired to the viewer (plugin
 > resolves each via the texturedict; `SkeletalMeshViewerWindow` paints each submesh its own brush). Body
 > decodes as denim shirt + Ellie's jeans + Converse high-tops, each its own 2K atlas (PNG-verified).
-> **Next:** open the app and eyeball the textured Ellie in the 3D viewer (only thing not yet GUI-checked),
-> then the multi-game UI shell (`design/ui-mockup.html`) and the RAGE `.ytd` reader.
+> **Next (TLOU2):** open the app and eyeball the textured Ellie in the 3D viewer (only thing not yet
+> GUI-checked), then the multi-game UI shell (`design/ui-mockup.html`).
+>
+> **Next (RAGE, active):** the RPF7 container layer is written and cross-checked but has never run
+> against a real archive. Run `tools/rage_rpf_probe.py --scan-dir` on the GTA V install first — it is
+> an independent Python implementation of the same format and it answers, in one pass, which edition
+> is installed, which encryption the archives use, and whether the entry counts are sane. Then build
+> the C# and confirm it agrees. Only after that does .ytd / .ydr / .ymap work make sense.
 
 ---
 
@@ -53,7 +59,10 @@ src/
     NaughtyDog/                  # TLOU2 .pak binary parser (custom format)
       NdPakMeshParser.cs         # Geometry decoding (quantised bitstream)
       PsarcReader.cs             # PSARC archive reader
-    RageEngine/                  # GTA5 / RDR2 (RPF archives) — stub
+    RageEngine/                  # GTA V (RPF7). RDR2 is NOT supported — see note below
+      RpfArchive.cs              # RPF7 container: TOC, entries, nested archives, deflate
+      GtaCrypto.cs               # AES + NG block ciphers, joaat + GTA5Hash (MIT, see third_party/)
+      GtaKeys.cs                 # loads a CodeWalker key dump (four .dat files)
 
   Exporters/
     TextureExporter/             # BC1/BC3/BC5/BC7 → PNG via BCnEncoder.NET
@@ -88,8 +97,18 @@ src/
 - NaughtyDog per-submesh textures: plugin resolves each submesh's diffuse to full-res via `texturedict3`;
   `SkeletalMeshViewerWindow` decodes + paints each submesh its own `ImageBrush` (PNG-verified; GUI eyeball pending)
 - Mesh-level diffuse: VRAM_DESC scan + full-res `texturedict3` hash lookup + BCnEncoder decode + ImageBrush
+- RAGE RPF7 container: correct magic, TOC decrypt (AES + NG), all three entry kinds, name table,
+  directory tree, raw deflate, nested archives via `StartPos`. Cross-checked against a literal
+  transcription of CodeWalker and against a synthetic archive (`tools/test_*.py`). **Not yet run
+  against real GTA V bytes.**
 
 ### In Progress
+- **GTA V map region export (active, one-week target)** — goal is a Del Perro Pier / Vespucci Beach
+  blockout in UE5 for the First Days opening. Architecture: GAE owns the container and the placement
+  layer, exports one asset per unique archetype plus a `region.json` placement manifest, and a UE
+  Python script spawns instanced components from it. Explicitly NOT one merged static mesh — the
+  point is to keep every asset swappable. Next steps in order: run the Python probe against the real
+  install, build and diff the C#, then `gta5_cache_y.dat` region query, then ymap/ytyp parsing.
 - **Multi-game UI shell + Codex/FModel hybrid** — see `design/ui-mockup.html`. `AssetBrowserView` is single-game;
   the data model already supports many games + a global cross-game search. Add the game rail + cross-game search VM.
 - Note: full-res dict textures are LINEAR (no GOB untile); only the 64×64 embedded thumbnails are tiled (per-submesh
@@ -99,7 +118,8 @@ src/
 - FBX model export (CUE4Parse-Conversion)
 - Audio playback with waveform (NAudio)
 - Animation viewer with timeline scrubber
-- RAGE engine plugin completion (GTA5, RDR2)
+- RAGE: .ytd texture dictionary reader (smallest next win — BC formats GAE already decodes, no GPU
+  tiling on PC, but note Stride is READ from the file at +0x56 on Legacy, not computed)
 - Full-quality texture loading from `texturedict3/common-dict.pak` (hash-based lookup)
 
 ---
@@ -151,6 +171,115 @@ Each submesh resolves its own material+textures via the `m_material` fixup point
   DiffuseTexturePath, NormalTexturePath}`. Authoritative reference: `fmt_nd_pak.py` ~L2296-2356
 
 ---
+
+## GTA V / RAGE RPF7 — Key Facts (verified against the format, not yet against her install)
+
+### Scope
+GTA V (PC) only. **RDR2 is not supported and the code no longer claims it.** RPF8 has a different
+header (decryption tag, platform id, 256-byte RSA signature), 24-byte entries, hash-only filenames,
+and a cipher called TFIT whose keys no public tool holds. CodeWalker has zero RPF8 support either.
+
+### Container
+- Header at the archive's `StartPos`: `u32 Version` (must read **0x52504637**; bytes on disk are
+  `37 46 50 52`), `u32 EntryCount`, `u32 NamesLength`, `u32 Encryption`
+- Encryption: `NONE=0`, `OPEN=0x4E45504F`, `AES=0x0FFFFFF9`, `NG=0x0FEFFFFF`. NG shipped with the
+  2015 PC port — it has nothing to do with the Enhanced edition
+- Then `EntryCount * 16` bytes of entries, then `NamesLength` bytes of names. Both are encrypted
+  together as one run
+- Entry kind is decided by the **second** u32 (entry +4): `== 0x7FFFFF00` directory,
+  `(x & 0x80000000) == 0` binary file, otherwise resource file
+- Directory entry: `u32 nameOffset`, `u32 0x7FFFFF00`, `u32 entriesIndex`, `u32 entriesCount` —
+  indices are into the single flat entry list in TOC order
+- Binary entry: one packed `u64` at +0 (`nameOffset = buf & 0xFFFF`, `size = (buf>>16) & 0xFFFFFF`,
+  `offset = (buf>>40) & 0xFFFFFF` in 512-byte sectors), `u32 uncompressedSize` at +8,
+  `u32 encryptionType` at +12 (0 or 1 only). `size == 0` means stored, `size > 0` means raw DEFLATE
+- Resource entry: `u16 nameOffset` at +0, 3-byte size at +2, 3-byte offset at +5 masked `& 0x7FFFFF`,
+  `u32 systemFlags` at +8, `u32 graphicsFlags` at +12. `size == 0xFFFFFF` is a **sentinel**: the real
+  size is smeared across the first 16 payload bytes as `b[7] | b[14]<<8 | b[5]<<16 | b[2]<<24`
+- Body offset is `StartPos + fileOffset * 512`, **plus 0x10 for resources only** (skipping the RSC7
+  header, whose flags are already in the TOC). Binary entries take no header skip
+- Page flags decode to a byte size via `0x200 << (flags & 0xF)` times a page count assembled from
+  scattered bit groups; resource version is `((sys>>28)&0xF)<<4 | ((gfx>>28)&0xF)`
+- **Nested archives are the whole ballgame.** Essentially all map data lives in RPFs stored as binary
+  entries inside other RPFs. A child's `StartPos = parent.StartPos + entry.FileOffset * 512`, and its
+  own `Name` and size are the NG key-derivation inputs for its own TOC
+
+### Encryption
+- **NG is not AES and shares no code with it.** 17 rounds of a table-driven SP network: RoundA for
+  rounds 0, 1 and 16, RoundB for 2..15, keyed by 101 x 272-byte subkeys and 17 x 16 x 256 uint32
+  tables. Any trailing partial block passes through in plaintext
+- Per-file subkey index is `(GTA5Hash(name) + length + (101 - 40)) % 101`. **`GTA5Hash` is not
+  joaat** — it is LUT-substituted (`temp = 1025 * (LUT[c] + result); result = (temp>>6) ^ temp`,
+  returning `32769 * ((9*result >> 11) ^ 9*result)`) and the name is **not lowercased**
+- Four key artifacts are needed, not three. The 256-byte hash LUT is the one people omit, and without
+  it every TOC decrypts to noise with no other symptom: `gtav_aes_key.dat` (32 B),
+  `gtav_ng_key.dat` (101x272), `gtav_ng_decrypt_tables.dat` (17x16x256x4), `gtav_hash_lut.dat` (256 B)
+- **CodeWalker is not needed to get them.** `tools/gta5_keys.py` locates all of it in your own
+  gta5.exe by SHA-1 hash search (the digests, not the keys, live in `tools/gta5_key_hashes.py`).
+  `--exe <GTA5.exe> --save-keys <dir>` makes it a one-time ~30s cost, and the saved layout is
+  byte-identical to a CodeWalker dump, so `GtaKeys.cs` reads it too
+- 375 key slots but only **187 distinct blobs**: GTA V reuses decrypt tables, so its 272 table slots
+  are drawn from 84 distinct tables, one of them 15 times. A digest->index map silently leaves 188
+  slots unfilled and makes a good exe look like it is missing key material; it must be digest->list
+- **Only tables of contents are encrypted.** Asset bodies are plaintext — CodeWalker sets
+  `IsEncrypted` for `.ysc` scripts alone. Once a TOC opens, .ydr/.ytd/.ymap need deflate and nothing
+  else. There is no AES key you can paste into a settings box; that setting has been removed
+
+### Region selection (next task, not yet built)
+- `update\update.rpf\common\data\gta5_cache_y.dat` is a precomputed spatial index over every ymap
+  in the game: flat 64-byte records with name, parent name, content flags and both extents. One AABB
+  pass gives the exact cell list with LOD parent links. Do not guess ymap names
+- Del Perro / Vespucci live in `_cityw/venice_01` (prefix `vb_`) and `_cityw/santamon_01` (prefix
+  `sm_`), both inside `x64m.rpf`. `bh1_` is Rockford Hills, not the beach
+- Del Perro Pier runs southwest from about (-1660,-1120) to (-1885,-1225), lower deck z ~ 8.5, upper
+  z ~ 12.9. Ferris Whale at (-1663.97, -1126.74, 29.32). Sea level is z = 0.0 across the region.
+  Note it is ~248 m long against the real Santa Monica Pier's ~500 m — a caricature, not a model
+
+### Editions
+The container half (RPF, NG, RSC7, ymap, ytyp) is identical between Legacy and Enhanced. Drawable and
+texture internals are not: `Texture` 144 -> 128 bytes, `VertexBuffer` 128 -> 64 with a 320-byte Gen9
+declaration, and the vertex buffer must be structurally rebuilt because component ordering changed.
+A Legacy-targeted reader on an Enhanced install mounts fine, lists fine, reads placements fine, then
+produces garbage geometry. Establish which edition is installed before writing any drawable code.
+
+### GTA V -> UE coordinate contract (derived and verified, not assumed)
+`tools/test_transform_convention.py` proves the whole chain. Quote it, do not re-derive it.
+- The model exporters apply `(x, z, -y)`, whose determinant is **+1**. That is a rotation about X,
+  NOT a handedness flip, despite what the old doc comments claimed. It is correct for a
+  right-handed Z-up source like GTA
+- Composed with UE's glTF import (which does flip handedness), the result is
+  **`UE = (gta.y, gta.x, gta.z) * 100`** — the XY swap, not negate-Y. Placements must use the same
+  composition as the meshes or the region mirrors against its own geometry, which reads as a
+  quaternion bug for a day
+- **`ue_quat = (stored.y, stored.x, stored.z, stored.w)`** straight off the ymap. `CEntityDef.rotation`
+  is stored as the conjugate, and inverting it then re-expressing the rotation in UE's basis
+  produces two sign flips that cancel. That cancellation is why this looks like a bare swap and why
+  it is worth a test rather than a comment. `CMloInstanceDef` is NOT conjugated; its children are
+- Scale is `(scaleXY, scaleXY, scaleZ)`, never uniform
+- GTA north lands on UE +Y. For north on +X, yaw the region root actor +90 rather than adding a
+  second conversion path
+
+### UE ingest contract
+`region.json` (`tools/ue/region_manifest.py`, format `gae.region/1`) is the seam between GAE and
+Unreal. Positions and rotations in it are **already in UE space**, so the conversion lives in exactly
+one place and cannot drift. One StaticMesh per unique archetype, many instances, never a merged mesh.
+Cells map one-to-one to source ymaps so they can become sublevels or Data Layers later.
+`tools/ue/spawn_region.py` batches one `add_instances` call per (cell, archetype) group with
+collision off during the spawn (the reported ISM slowness is Chaos collision rebuild, not an
+instance-count ceiling). An instance referencing an archetype with no imported mesh is a **hard
+failure**, never a silent skip — the silent version places most of the region and leaves the beach
+quietly emptier than the game, which is invisible without the check.
+`tools/test_ue_spawn.py` builds a synthetic Del Perro Pier from the real coordinates and exercises
+all of it offline; the region.json it writes can drive a cube-mesh dry run in UE before GAE exports
+anything.
+
+### Validation pattern
+Same as the TLOU2 work: Python first, against real bytes, then port. `tools/rage_rpf_probe.py` is an
+independent implementation of everything above; `tools/test_rage_crypto.py` differentially tests the
+NG cipher against a literal CodeWalker transcription (2000 random blocks); `tools/test_rpf_roundtrip.py`
+builds a synthetic RPF7 with a nested archive and reads it back. `tools/test_transform_convention.py`
+and `tools/test_ue_spawn.py` cover the Unreal half. All five pass. None of them has seen a real GTA V
+archive yet, which is the single next thing to do.
 
 ## Test Assets (on Madi's PC)
 

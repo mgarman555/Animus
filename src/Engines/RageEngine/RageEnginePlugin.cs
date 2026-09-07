@@ -4,39 +4,37 @@ using GameAssetExplorer.Core.Models;
 namespace GameAssetExplorer.Engines.RageEngine;
 
 /// <summary>
-/// Engine plugin for Rockstar Games titles using the RAGE (Rockstar Advanced Game Engine).
+/// Engine plugin for GTA V (PC), RAGE / RPF7.
 ///
-/// Supported games:
-///   GTA V (PC)   — RPF7, AES-256 encrypted (key required for most archives)
-///   RDR 2 (PC)   — RPF8, unencrypted
+/// RDR 2 is deliberately not claimed here. RPF8 is a different container: a longer header with a
+/// decryption tag, a platform id and a 256-byte RSA signature, 24-byte entries, hash-only
+/// filenames, and a cipher (TFIT) whose keys no public tool holds. Nothing in this file reads it.
 ///
-/// Asset formats inside RPF archives:
-///   .ytd  — texture dictionary (DDS textures bundled together)
-///   .ydr  — drawable / static mesh
-///   .ydd  — drawable dictionary (multiple meshes)
-///   .yft  — fragment (destructible/rigged mesh)
-///   .ycd  — clip dictionary (animations)
-///   .awc  — audio wave container
-///   .ysc  — script
-///   .ymap — map placement data
-///
-/// For GTA V: supply the AES key in EngineSpecificSettings["AesKey"] (64 hex chars, no 0x).
-/// The key is publicly documented in community tools (OpenIV, CodeWalker).
-/// RDR 2 requires no key.
+/// Archive tables of contents are NG-encrypted and NG is not AES, so there is no key you can type
+/// into a text box. Point EngineSpecificSettings["KeysDirectory"] at a CodeWalker key dump, or
+/// drop the four .dat files in %AppData%\GameAssetExplorer\RageKeys and it is found automatically.
+/// See <see cref="GtaKeys"/>.
 /// </summary>
 public class RageEnginePlugin : IGameEngine
 {
-    private readonly List<RpfReader>                        _readers      = new();
-    private readonly List<(RpfEntry Entry, string Archive)> _index        = new();
-    private readonly Dictionary<string, RpfReader>          _readerByPath = new(StringComparer.OrdinalIgnoreCase);
-    private GameConfig? _currentConfig;
+    private readonly List<RpfArchive> _roots = new();
+    private readonly List<AssetInfo>  _assets = new();
+
+    /// <summary>Virtual path (forward slashes, lowercase) to the entry that produced it.</summary>
+    private readonly Dictionary<string, RpfFileEntry> _byPath = new(StringComparer.OrdinalIgnoreCase);
+
+    private GtaKeys? _keys;
 
     public string EngineName => "RAGE Engine";
     public string EngineId   => "RAGE";
-    public bool   IsMounted  => _readers.Count > 0;
+    public bool   IsMounted  => _assets.Count > 0;
 
-    public IReadOnlyList<string> SupportedVersions  => new[] { "GTA5-RPF7", "RDR2-RPF8" };
-    public IReadOnlyList<string> ArchiveExtensions  => new[] { ".rpf" };
+    public IReadOnlyList<string> SupportedVersions => new[] { "GTA5-RPF7" };
+    public IReadOnlyList<string> ArchiveExtensions => new[] { ".rpf" };
+
+    /// <summary>Encryption type counts from the last mount. The first thing to check when a mount looks wrong.</summary>
+    public IReadOnlyDictionary<RpfEncryption, int> EncryptionHistogram => _encryptionHistogram;
+    private readonly Dictionary<RpfEncryption, int> _encryptionHistogram = new();
 
     // ── Detection ─────────────────────────────────────────────────────────────
 
@@ -44,146 +42,204 @@ public class RageEnginePlugin : IGameEngine
     {
         if (!Directory.Exists(gameDirectory)) return 0f;
 
-        var rpfs = SafeEnumerateFiles(gameDirectory, "*.rpf").ToArray();
-        if (rpfs.Length == 0) return 0f;
+        var names = SafeEnumerateFiles(gameDirectory, "*.rpf")
+                        .Select(f => Path.GetFileName(f).ToLowerInvariant())
+                        .ToHashSet();
+        if (names.Count == 0) return 0f;
 
-        bool hasGta5 = rpfs.Any(f => Path.GetFileName(f).Equals("update.rpf", StringComparison.OrdinalIgnoreCase)
-                                  || Path.GetFileName(f).Equals("common.rpf", StringComparison.OrdinalIgnoreCase));
-        bool hasRdr2 = rpfs.Any(f => Path.GetFileName(f).StartsWith("appdata0_", StringComparison.OrdinalIgnoreCase));
+        bool gta5 = names.Contains("common.rpf") || names.Contains("update.rpf")
+                 || names.Any(n => n.Length == 8 && n.StartsWith("x64") && n.EndsWith(".rpf"));
 
-        return (hasGta5 || hasRdr2) ? 0.95f : 0.80f;
+        return gta5 ? 0.95f : 0.50f;
     }
 
-    // ── Mount / Unmount ───────────────────────────────────────────────────────
+    // ── Mount ─────────────────────────────────────────────────────────────────
 
     public async Task<bool> MountGameAsync(GameConfig config, IProgress<string>? progress = null)
     {
-        _currentConfig = config;
+        Reset();
 
-        byte[]? aesKey = null;
-        if (config.EngineSpecificSettings.TryGetValue("AesKey", out var keyHex) &&
-            !string.IsNullOrEmpty(keyHex))
+        config.EngineSpecificSettings.TryGetValue("KeysDirectory", out var keysDir);
+        if (!GtaKeys.TryLoadFromKnownLocations(keysDir, out _keys, out string keyError))
         {
-            try { aesKey = HexToBytes(keyHex.Replace("0x", "").Replace(" ", "")); }
-            catch { Console.WriteLine("[RAGE] AES key is invalid hex — ignoring."); }
+            // Not fatal on its own: an all-OPEN install still mounts. Encrypted archives will
+            // report per-archive below, and the histogram makes the situation obvious.
+            progress?.Report("No RAGE key set loaded — encrypted archives will be skipped.");
+            Console.WriteLine($"[RAGE] {keyError}");
+        }
+        else
+        {
+            Console.WriteLine($"[RAGE] Keys loaded from {_keys!.SourceDirectory}");
         }
 
         progress?.Report("Scanning for .rpf archives…");
+
+        // Deterministic order. It decides which DLC or mod wins when two archives define the same
+        // archetype, so it must be reproducible run to run.
         var archives = SafeEnumerateFiles(config.GameDirectory, "*.rpf")
-                                .OrderBy(f => f)
-                                .ToArray();
+                          .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                          .ToArray();
 
         if (archives.Length == 0)
         {
-            Console.WriteLine($"[RAGE] No .rpf files found in {config.GameDirectory}");
+            Console.WriteLine($"[RAGE] No .rpf files under {config.GameDirectory}");
+            progress?.Report("No .rpf archives found.");
             return false;
         }
 
-        progress?.Report($"Found {archives.Length} archive(s). Reading file tables…");
+        if (archives.Any(f => f.Replace('/', '\\').Contains("\\mods\\", StringComparison.OrdinalIgnoreCase)))
+        {
+            Console.WriteLine("[RAGE] WARNING: a mods folder is present. Modded archives override base "
+                            + "game assets by name hash, so exports may not be vanilla geometry.");
+            progress?.Report("Warning: mods folder detected — exports may not be vanilla.");
+        }
+
+        var failures = new List<string>();
 
         await Task.Run(() =>
         {
-            int i = 0;
-            foreach (var file in archives)
+            for (int i = 0; i < archives.Length; i++)
             {
-                i++;
-                progress?.Report($"[{i}/{archives.Length}] {Path.GetFileName(file)}");
+                string file = archives[i];
+                progress?.Report($"[{i + 1}/{archives.Length}] {Path.GetFileName(file)}");
+
                 try
                 {
-                    var reader = new RpfReader(file);
-                    reader.Open(aesKey);
-                    _readers.Add(reader);
-                    _readerByPath[file] = reader;
-                    foreach (var entry in reader.Entries)
-                        _index.Add((entry, file));
+                    var root = new RpfArchive(file);
+                    using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var br = new BinaryReader(fs))
+                    {
+                        root.ScanStructure(br, _keys, err => failures.Add(err));
+                    }
+                    _roots.Add(root);
                 }
                 catch (Exception ex)
                 {
-                    // Encrypted archive without key, or corrupt file — skip silently
-                    Console.WriteLine($"[RAGE] Skipped {Path.GetFileName(file)}: {ex.Message}");
+                    failures.Add($"{Path.GetFileName(file)}: {ex.Message}");
                 }
             }
+
+            BuildIndex();
         });
 
-        progress?.Report($"Mounted {_index.Count:N0} files from {_readers.Count} archive(s).");
-        Console.WriteLine($"[RAGE] Mounted: {config.DisplayName} ({_index.Count:N0} files)");
-        return _index.Count > 0;
+        foreach (var (enc, count) in _encryptionHistogram.OrderByDescending(kv => kv.Value))
+            Console.WriteLine($"[RAGE] encryption {enc,-5} : {count,5} archive(s)");
+
+        if (failures.Count > 0)
+        {
+            Console.WriteLine($"[RAGE] {failures.Count} archive(s) failed to open. First few:");
+            foreach (var f in failures.Take(5)) Console.WriteLine($"[RAGE]   {f}");
+        }
+
+        int rpfCount = _roots.Sum(r => r.EnumerateArchives().Count());
+        Console.WriteLine($"[RAGE] Mounted {config.DisplayName}: {_assets.Count:N0} files across "
+                        + $"{rpfCount:N0} archive(s) ({_roots.Count} on disk).");
+        progress?.Report($"Mounted {_assets.Count:N0} files from {rpfCount:N0} archive(s).");
+
+        return _assets.Count > 0;
     }
 
-    public async Task UnmountGameAsync()
+    private void BuildIndex()
     {
-        foreach (var r in _readers) r.Dispose();
-        _readers.Clear();
-        _readerByPath.Clear();
-        _index.Clear();
-        _currentConfig = null;
-        await Task.CompletedTask;
+        foreach (var root in _roots)
+        {
+            foreach (var archive in root.EnumerateArchives())
+            {
+                _encryptionHistogram[archive.Encryption] =
+                    _encryptionHistogram.GetValueOrDefault(archive.Encryption) + 1;
+
+                foreach (var entry in archive.Files)
+                {
+                    string vpath = entry.Path.Replace('\\', '/');
+
+                    // Two archives can legitimately define the same path (base game vs DLC vs mods).
+                    // Later in mount order wins, matching how the game resolves overrides.
+                    _byPath[vpath] = entry;
+
+                    _assets.Add(new AssetInfo
+                    {
+                        VirtualPath      = vpath,
+                        Name             = Path.GetFileNameWithoutExtension(entry.Name),
+                        Type             = InferAssetType(entry.NameLower),
+                        CompressedSize   = entry.FileSize,
+                        UncompressedSize = entry.GetFileSize(),
+                        ArchivePath      = archive.PhysicalPath,
+                        EngineClassName  = Path.GetExtension(entry.NameLower).TrimStart('.'),
+                        IsEncrypted      = entry.IsEncrypted,
+                    });
+                }
+            }
+        }
+    }
+
+    public Task UnmountGameAsync()
+    {
+        Reset();
+        _keys = null;
+        return Task.CompletedTask;
+    }
+
+    private void Reset()
+    {
+        _roots.Clear();
+        _assets.Clear();
+        _byPath.Clear();
+        _encryptionHistogram.Clear();
     }
 
     // ── Asset listing ─────────────────────────────────────────────────────────
 
     public Task<IReadOnlyList<AssetInfo>> GetAllAssetsAsync()
-    {
-        var results = new List<AssetInfo>(_index.Count);
-        foreach (var (entry, archive) in _index)
-            results.Add(EntryToInfo(entry, archive));
-        return Task.FromResult<IReadOnlyList<AssetInfo>>(results);
-    }
+        => Task.FromResult<IReadOnlyList<AssetInfo>>(_assets);
 
-    public async Task<IReadOnlyList<AssetInfo>> GetAssetsAtPathAsync(string virtualPath)
+    public Task<IReadOnlyList<AssetInfo>> GetAssetsAtPathAsync(string virtualPath)
     {
-        var all        = await GetAllAssetsAsync();
-        var normalized = virtualPath.TrimEnd('/').ToLowerInvariant();
-        return all.Where(a =>
-        {
-            var dir = Path.GetDirectoryName(a.VirtualPath)?.Replace('\\', '/').ToLowerInvariant() ?? "";
-            return dir.StartsWith(normalized);
-        }).ToList();
+        string prefix = virtualPath.Replace('\\', '/').TrimEnd('/');
+        var results = _assets
+            .Where(a => a.VirtualPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        return Task.FromResult<IReadOnlyList<AssetInfo>>(results);
     }
 
     // ── Asset loading ─────────────────────────────────────────────────────────
 
     public async Task<AssetData> LoadAssetAsync(AssetInfo asset)
     {
-        var match = _index.FirstOrDefault(e => e.Entry.VirtualPath == asset.VirtualPath);
-        if (match.Entry == null)
-            throw new Exception($"Asset not found: {asset.VirtualPath}");
+        if (!_byPath.TryGetValue(asset.VirtualPath, out var entry))
+            throw new FileNotFoundException($"Asset not mounted: {asset.VirtualPath}");
 
-        var reader = FindReaderForArchive(match.Archive)
-            ?? throw new Exception($"Reader not found for: {match.Archive}");
+        var archive = entry.Archive
+            ?? throw new InvalidOperationException($"Entry has no owning archive: {entry.Path}");
 
-        var rawData = await Task.Run(() => reader.ExtractFile(match.Entry));
+        byte[] data = await Task.Run(() => archive.ExtractFile(entry, _keys))
+            ?? throw new InvalidDataException($"Could not extract {entry.Path}.");
+
+        var props = new Dictionary<string, object?>
+        {
+            ["_Archive"]     = archive.Path,
+            ["_Physical"]    = archive.PhysicalPath,
+            ["_Encryption"]  = archive.Encryption.ToString(),
+            ["_FileOffset"]  = entry.FileOffset,
+            ["_FileSize"]    = entry.FileSize,
+            ["_IsResource"]  = entry is RpfResourceFileEntry,
+        };
+
+        if (entry is RpfResourceFileEntry res)
+        {
+            props["_ResourceVersion"] = res.Version;
+            props["_SystemSize"]      = res.SystemSize;
+            props["_GraphicsSize"]    = res.GraphicsSize;
+        }
 
         return new RageRawAssetData
         {
-            Info       = asset,
-            RawData    = rawData,
-            RawProperties = new Dictionary<string, object?>
-            {
-                ["_Archive"]    = Path.GetFileName(match.Archive),
-                ["_FileSize"]   = match.Entry.FileSize,
-                ["_OnDiskSize"] = match.Entry.OnDiskSize,
-                ["_IsResource"] = match.Entry.IsResource,
-            }
+            Info          = asset,
+            RawData       = data,
+            RawProperties = props,
         };
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private static AssetInfo EntryToInfo(RpfEntry entry, string archivePath) => new()
-    {
-        VirtualPath      = entry.VirtualPath,
-        Name             = Path.GetFileNameWithoutExtension(entry.Name),
-        Type             = InferAssetType(entry.Name),
-        CompressedSize   = entry.OnDiskSize,
-        UncompressedSize = entry.FileSize,
-        ArchivePath      = archivePath,
-        EngineClassName  = string.Empty,
-        IsEncrypted      = false   // per-file encryption not supported yet
-    };
-
-    private RpfReader? FindReaderForArchive(string archivePath)
-        => _readerByPath.TryGetValue(archivePath, out var r) ? r : _readers.FirstOrDefault();
 
     private static IEnumerable<string> SafeEnumerateFiles(string root, string pattern)
     {
@@ -192,13 +248,14 @@ public class RageEnginePlugin : IGameEngine
         while (queue.Count > 0)
         {
             string dir = queue.Dequeue();
-            IEnumerable<string> files = Enumerable.Empty<string>();
+
+            IEnumerable<string> files = Array.Empty<string>();
             try { files = Directory.EnumerateFiles(dir, pattern); }
             catch (UnauthorizedAccessException) { }
             catch (IOException) { }
             foreach (var f in files) yield return f;
 
-            IEnumerable<string> subdirs = Enumerable.Empty<string>();
+            IEnumerable<string> subdirs = Array.Empty<string>();
             try { subdirs = Directory.EnumerateDirectories(dir); }
             catch (UnauthorizedAccessException) { }
             catch (IOException) { }
@@ -206,32 +263,23 @@ public class RageEnginePlugin : IGameEngine
         }
     }
 
-    private static AssetType InferAssetType(string name)
+    private static AssetType InferAssetType(string nameLower) => Path.GetExtension(nameLower) switch
     {
-        var ext = Path.GetExtension(name).ToLowerInvariant();
-        return ext switch
-        {
-            ".ytd"              => AssetType.Texture,       // texture dictionary
-            ".ydr" or ".ydd"
-                or ".yft"       => AssetType.StaticMesh,    // mesh types
-            ".ycd"              => AssetType.Animation,     // clip dictionary
-            ".awc"              => AssetType.Audio,         // audio wave container
-            ".dds"              => AssetType.Texture,
-            _                   => AssetType.Unknown
-        };
-    }
-
-    private static byte[] HexToBytes(string hex)
-    {
-        if (hex.Length % 2 != 0) throw new ArgumentException("Hex string must have even length.");
-        var bytes = new byte[hex.Length / 2];
-        for (int i = 0; i < bytes.Length; i++)
-            bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
-        return bytes;
-    }
+        ".ytd"                        => AssetType.Texture,        // texture dictionary
+        ".ydr" or ".ydd" or ".yft"
+             or ".ypt" or ".yld"      => AssetType.StaticMesh,     // drawable / dictionary / fragment
+        ".ycd"                        => AssetType.Animation,      // clip dictionary
+        ".awc"                        => AssetType.Audio,
+        ".ymap" or ".ytyp" or ".ymt"  => AssetType.Level,          // placement / archetypes / metadata
+        ".ybn" or ".ynv" or ".yed"    => AssetType.Other,          // bounds / navmesh / expressions
+        ".ysc"                        => AssetType.Blueprint,      // script
+        ".dds"                        => AssetType.Texture,
+        ".xml" or ".meta" or ".dat"   => AssetType.DataTable,
+        _                             => AssetType.Unknown,
+    };
 }
 
-/// <summary>Raw RPF file data for formats we haven't decoded further yet.</summary>
+/// <summary>Raw bytes out of an RPF, decrypted and inflated. Format decoding comes later.</summary>
 public class RageRawAssetData : AssetData
 {
     public byte[] RawData { get; set; } = Array.Empty<byte>();
